@@ -1,14 +1,9 @@
-envVars:
-  - key: PYTHON_VERSION
-    value: 3.12.6
 services:
   - type: web
     name: telegram-anime-bot
     env: python
     buildCommand: |
       pyenv install -s 3.12.6
-      pyenv global 3.12.6
-      pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
