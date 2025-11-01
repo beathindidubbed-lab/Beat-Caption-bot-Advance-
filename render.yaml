@@ -1,3 +1,6 @@
+envVars:
+  - key: PYTHON_VERSION
+    value: 3.12.6
 services:
   - type: web
     name: telegram-anime-bot
