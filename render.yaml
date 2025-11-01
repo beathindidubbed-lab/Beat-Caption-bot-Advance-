@@ -1,8 +1,12 @@
 services:
   - type: web
     name: telegram-anime-bot
-    runtime: python
-    buildCommand: pip install -r requirements.txt
+    env: python
+    buildCommand: |
+      pyenv install -s 3.12.6
+      pyenv global 3.12.6
+      pip install --upgrade pip
+      pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: API_ID
@@ -18,7 +22,9 @@ services:
       - key: RENDER_EXTERNAL_URL
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: anime-bot-db
+          property: connectionString
 
 databases:
   - name: anime-bot-db
