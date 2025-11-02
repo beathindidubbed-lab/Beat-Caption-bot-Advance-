@@ -1,3 +1,5 @@
+import sys
+
 import json
 from pyrogram import Client, filters, idle
 from pyrogram.enums import ParseMode
@@ -29,7 +31,16 @@ DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
 db_pool = None
 
 # Pyrogram app
-app = Client("auto_caption_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client(
+    "auto_caption_bot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    workers=4
+)
+
+print(f"🔧 Pyrogram Client initialized with API_ID: {API_ID}", flush=True)
+print(f"🔧 BOT_TOKEN present: {'Yes' if BOT_TOKEN else 'No'}", flush=True)
 
 # Track users waiting for input and last messages
 waiting_for_input = {}  # user_id -> input_type
@@ -1342,49 +1353,55 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✅ Web server started on port {PORT}")
+    print(f"✅ Web server started on 0.0.0.0:{PORT}")
+    print(f"🌐 Health check: http://0.0.0.0:{PORT}/health")
 
 
 async def main():
     """Main function to run bot and web server"""
     
     try:
-        # Initialize database
-        await init_db()
-        
-        # Start web server
+        # Start web server FIRST
+        print("🌐 Starting web server...", flush=True)
         await start_web_server()
+        print(f"✅ Web server listening on port {PORT}", flush=True)
+        
+        # Initialize database
+        print("🗄️ Initializing database...", flush=True)
+        await init_db()
         
         # Start self-ping task
         asyncio.create_task(self_ping())
         
         # Start bot
-        print("🚀 Starting Pyrogram bot...")
+        print("🚀 Starting Pyrogram bot...", flush=True)
         await app.start()
-        print("✅ Bot started successfully!")
-        print(f"🤖 Bot username: @{app.me.username}")
-        print(f"🆔 Bot ID: {app.me.id}")
-        print("🤖 Multi-user mode enabled")
-        print("👥 Each user has their own settings and target channel")
-        print("📡 Bot is now listening for messages...")
+        print("✅ Bot started successfully!", flush=True)
+        print(f"🤖 Bot username: @{app.me.username}", flush=True)
+        print(f"🆔 Bot ID: {app.me.id}", flush=True)
+        print("🤖 Multi-user mode enabled", flush=True)
+        print("👥 Each user has their own settings and target channel", flush=True)
+        print("📡 Bot is now listening for messages...", flush=True)
+        sys.stdout.flush()
         
         # Keep running using idle
         await idle()
         
     except KeyboardInterrupt:
-        print("⚠️ Bot stopped by user")
+        print("⚠️ Bot stopped by user", flush=True)
     except Exception as e:
-        print(f"❌ Error in main: {e}")
+        print(f"❌ Error in main: {e}", flush=True)
         import traceback
         traceback.print_exc()
+        sys.stdout.flush()
     finally:
         if app.is_connected:
-            print("🛑 Stopping bot...")
+            print("🛑 Stopping bot...", flush=True)
             await app.stop()
         if db_pool:
-            print("🗄️ Closing database pool...")
+            print("🗄️ Closing database pool...", flush=True)
             await db_pool.close()
-        print("👋 Shutdown complete")
+        print("👋 Shutdown complete", flush=True)
 
 
 if __name__ == "__main__":
