@@ -7,7 +7,8 @@ import asyncio
 import os
 from aiohttp import web
 import aiohttp
-import asyncpg
+import psycopg
+from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 
 # Bot credentials and config
@@ -53,91 +54,83 @@ async def init_db():
     global db_pool
     if DATABASE_URL:
         try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+            db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10)
+            await db_pool.open()
             
             # Create tables
-            async with db_pool.acquire() as conn:
-                # User settings table
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS user_settings (
-                        user_id BIGINT PRIMARY KEY,
-                        username TEXT,
-                        first_name TEXT,
-                        season INTEGER NOT NULL DEFAULT 1,
-                        episode INTEGER NOT NULL DEFAULT 1,
-                        total_episode INTEGER NOT NULL DEFAULT 1,
-                        video_count INTEGER NOT NULL DEFAULT 0,
-                        selected_qualities TEXT NOT NULL DEFAULT '480p,720p,1080p',
-                        base_caption TEXT NOT NULL,
-                        target_chat_id BIGINT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    # User settings table
+                    await cur.execute('''
+                        CREATE TABLE IF NOT EXISTS user_settings (
+                            user_id BIGINT PRIMARY KEY,
+                            username TEXT,
+                            first_name TEXT,
+                            season INTEGER NOT NULL DEFAULT 1,
+                            episode INTEGER NOT NULL DEFAULT 1,
+                            total_episode INTEGER NOT NULL DEFAULT 1,
+                            video_count INTEGER NOT NULL DEFAULT 0,
+                            selected_qualities TEXT NOT NULL DEFAULT '480p,720p,1080p',
+                            base_caption TEXT NOT NULL,
+                            target_chat_id BIGINT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Welcome message settings table
+                    await cur.execute('''
+                        CREATE TABLE IF NOT EXISTS welcome_settings (
+                            id SERIAL PRIMARY KEY,
+                            message_type TEXT NOT NULL,
+                            file_id TEXT,
+                            caption TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Upload history table
+                    await cur.execute('''
+                        CREATE TABLE IF NOT EXISTS upload_history (
+                            id SERIAL PRIMARY KEY,
+                            user_id BIGINT NOT NULL,
+                            season INTEGER NOT NULL,
+                            episode INTEGER NOT NULL,
+                            total_episode INTEGER NOT NULL,
+                            quality TEXT NOT NULL,
+                            file_id TEXT NOT NULL,
+                            caption TEXT,
+                            target_chat_id BIGINT,
+                            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Channel info table
+                    await cur.execute('''
+                        CREATE TABLE IF NOT EXISTS channel_info (
+                            user_id BIGINT NOT NULL,
+                            chat_id BIGINT NOT NULL,
+                            username TEXT,
+                            title TEXT,
+                            type TEXT,
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (user_id, chat_id)
+                        )
+                    ''')
+                    
+                    # Create indexes for better performance
+                    await cur.execute('''
+                        CREATE INDEX IF NOT EXISTS idx_upload_history_user_id 
+                        ON upload_history(user_id)
+                    ''')
+                    
+                    await cur.execute('''
+                        CREATE INDEX IF NOT EXISTS idx_upload_history_uploaded_at 
+                        ON upload_history(uploaded_at)
+                    ''')
                 
-                # Welcome message settings table
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS welcome_settings (
-                        id SERIAL PRIMARY KEY,
-                        message_type TEXT NOT NULL,
-                        file_id TEXT,
-                        caption TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                
-                # Welcome message settings table
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS welcome_settings (
-                        id SERIAL PRIMARY KEY,
-                        message_type TEXT NOT NULL,
-                        file_id TEXT,
-                        caption TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                
-                # Upload history table
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS upload_history (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        season INTEGER NOT NULL,
-                        episode INTEGER NOT NULL,
-                        total_episode INTEGER NOT NULL,
-                        quality TEXT NOT NULL,
-                        file_id TEXT NOT NULL,
-                        caption TEXT,
-                        target_chat_id BIGINT,
-                        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                
-                # Channel info table
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS channel_info (
-                        user_id BIGINT NOT NULL,
-                        chat_id BIGINT NOT NULL,
-                        username TEXT,
-                        title TEXT,
-                        type TEXT,
-                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (user_id, chat_id)
-                    )
-                ''')
-                
-                # Create indexes for better performance
-                await conn.execute('''
-                    CREATE INDEX IF NOT EXISTS idx_upload_history_user_id 
-                    ON upload_history(user_id)
-                ''')
-                
-                await conn.execute('''
-                    CREATE INDEX IF NOT EXISTS idx_upload_history_uploaded_at 
-                    ON upload_history(uploaded_at)
-                ''')
+                await conn.commit()
             
             print("✅ PostgreSQL database initialized successfully")
         except Exception as e:
@@ -152,45 +145,52 @@ async def get_user_settings(user_id, username=None, first_name=None):
     """Load settings for a specific user from database or create default"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    'SELECT * FROM user_settings WHERE user_id = $1', 
-                    user_id
-                )
-                
-                if row:
-                    return {
-                        'user_id': row['user_id'],
-                        'season': row['season'],
-                        'episode': row['episode'],
-                        'total_episode': row['total_episode'],
-                        'video_count': row['video_count'],
-                        'selected_qualities': row['selected_qualities'].split(',') if row['selected_qualities'] else [],
-                        'base_caption': row['base_caption'],
-                        'target_chat_id': row['target_chat_id']
-                    }
-                else:
-                    # Create default settings for new user
-                    default_settings = {
-                        'user_id': user_id,
-                        'season': 1,
-                        'episode': 1,
-                        'total_episode': 1,
-                        'video_count': 0,
-                        'selected_qualities': ["480p", "720p", "1080p"],
-                        'base_caption': DEFAULT_CAPTION,
-                        'target_chat_id': None
-                    }
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'SELECT * FROM user_settings WHERE user_id = %s', 
+                        (user_id,)
+                    )
+                    row = await cur.fetchone()
                     
-                    await conn.execute('''
-                        INSERT INTO user_settings 
-                        (user_id, username, first_name, season, episode, total_episode, 
-                         video_count, selected_qualities, base_caption, target_chat_id)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                    ''', user_id, username, first_name, 1, 1, 1, 0, 
-                        '480p,720p,1080p', DEFAULT_CAPTION, None)
-                    
-                    return default_settings
+                    if row:
+                        # Get column names
+                        colnames = [desc[0] for desc in cur.description]
+                        row_dict = dict(zip(colnames, row))
+                        
+                        return {
+                            'user_id': row_dict['user_id'],
+                            'season': row_dict['season'],
+                            'episode': row_dict['episode'],
+                            'total_episode': row_dict['total_episode'],
+                            'video_count': row_dict['video_count'],
+                            'selected_qualities': row_dict['selected_qualities'].split(',') if row_dict['selected_qualities'] else [],
+                            'base_caption': row_dict['base_caption'],
+                            'target_chat_id': row_dict['target_chat_id']
+                        }
+                    else:
+                        # Create default settings for new user
+                        default_settings = {
+                            'user_id': user_id,
+                            'season': 1,
+                            'episode': 1,
+                            'total_episode': 1,
+                            'video_count': 0,
+                            'selected_qualities': ["480p", "720p", "1080p"],
+                            'base_caption': DEFAULT_CAPTION,
+                            'target_chat_id': None
+                        }
+                        
+                        await cur.execute('''
+                            INSERT INTO user_settings 
+                            (user_id, username, first_name, season, episode, total_episode, 
+                             video_count, selected_qualities, base_caption, target_chat_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ''', (user_id, username, first_name, 1, 1, 1, 0, 
+                            '480p,720p,1080p', DEFAULT_CAPTION, None))
+                        
+                        await conn.commit()
+                        return default_settings
         except Exception as e:
             print(f"Error loading user settings from database: {e}")
     
@@ -218,19 +218,20 @@ async def save_user_settings(settings):
     
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                await conn.execute('''
-                    UPDATE user_settings SET 
-                        season = $2, episode = $3, total_episode = $4, 
-                        video_count = $5, selected_qualities = $6, 
-                        base_caption = $7, target_chat_id = $8, 
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = $1
-                ''', user_id, settings['season'], settings['episode'], 
-                    settings['total_episode'], settings['video_count'], 
-                    ','.join(settings['selected_qualities']),
-                    settings['base_caption'], settings['target_chat_id']
-                )
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('''
+                        UPDATE user_settings SET 
+                            season = %s, episode = %s, total_episode = %s, 
+                            video_count = %s, selected_qualities = %s, 
+                            base_caption = %s, target_chat_id = %s, 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    ''', (settings['season'], settings['episode'], 
+                        settings['total_episode'], settings['video_count'], 
+                        ','.join(settings['selected_qualities']),
+                        settings['base_caption'], settings['target_chat_id'], user_id))
+                await conn.commit()
             return
         except Exception as e:
             print(f"Error saving user settings to database: {e}")
@@ -244,12 +245,14 @@ async def log_upload(user_id, season, episode, total_episode, quality, file_id, 
     """Log upload to database"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                await conn.execute('''
-                    INSERT INTO upload_history 
-                    (user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ''', user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id)
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('''
+                        INSERT INTO upload_history 
+                        (user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ''', (user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id))
+                await conn.commit()
         except Exception as e:
             print(f"Error logging upload: {e}")
 
@@ -258,16 +261,18 @@ async def save_channel_info(user_id, chat_id, username, title, chat_type):
     """Save channel info to database"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                await conn.execute('''
-                    INSERT INTO channel_info (user_id, chat_id, username, title, type)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (user_id, chat_id) DO UPDATE SET
-                        username = EXCLUDED.username,
-                        title = EXCLUDED.title,
-                        type = EXCLUDED.type,
-                        added_at = CURRENT_TIMESTAMP
-                ''', user_id, chat_id, username, title, chat_type)
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('''
+                        INSERT INTO channel_info (user_id, chat_id, username, title, type)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, chat_id) DO UPDATE SET
+                            username = EXCLUDED.username,
+                            title = EXCLUDED.title,
+                            type = EXCLUDED.type,
+                            added_at = CURRENT_TIMESTAMP
+                    ''', (user_id, chat_id, username, title, chat_type))
+                await conn.commit()
         except Exception as e:
             print(f"Error saving channel info: {e}")
 
@@ -276,16 +281,23 @@ async def get_user_upload_stats(user_id):
     """Get upload statistics for a specific user"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                total = await conn.fetchval(
-                    'SELECT COUNT(*) FROM upload_history WHERE user_id = $1', 
-                    user_id
-                )
-                today = await conn.fetchval(
-                    'SELECT COUNT(*) FROM upload_history WHERE user_id = $1 AND DATE(uploaded_at) = CURRENT_DATE',
-                    user_id
-                )
-                return total or 0, today or 0
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'SELECT COUNT(*) FROM upload_history WHERE user_id = %s', 
+                        (user_id,)
+                    )
+                    total = await cur.fetchone()
+                    total = total[0] if total else 0
+                    
+                    await cur.execute(
+                        'SELECT COUNT(*) FROM upload_history WHERE user_id = %s AND DATE(uploaded_at) = CURRENT_DATE',
+                        (user_id,)
+                    )
+                    today = await cur.fetchone()
+                    today = today[0] if today else 0
+                    
+                    return total, today
         except Exception as e:
             print(f"Error getting stats: {e}")
     return 0, 0
@@ -295,9 +307,11 @@ async def get_all_users_count():
     """Get total number of users"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                count = await conn.fetchval('SELECT COUNT(*) FROM user_settings')
-                return count or 0
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('SELECT COUNT(*) FROM user_settings')
+                    count = await cur.fetchone()
+                    return count[0] if count else 0
         except Exception as e:
             print(f"Error getting user count: {e}")
     return 0
@@ -307,16 +321,20 @@ async def get_welcome_message():
     """Get welcome message from database"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    'SELECT * FROM welcome_settings ORDER BY id DESC LIMIT 1'
-                )
-                if row:
-                    return {
-                        'message_type': row['message_type'],
-                        'file_id': row['file_id'],
-                        'caption': row['caption']
-                    }
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        'SELECT * FROM welcome_settings ORDER BY id DESC LIMIT 1'
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        colnames = [desc[0] for desc in cur.description]
+                        row_dict = dict(zip(colnames, row))
+                        return {
+                            'message_type': row_dict['message_type'],
+                            'file_id': row_dict['file_id'],
+                            'caption': row_dict['caption']
+                        }
         except Exception as e:
             print(f"Error getting welcome message: {e}")
     return None
@@ -326,15 +344,17 @@ async def save_welcome_message(message_type, file_id, caption):
     """Save welcome message to database"""
     if db_pool:
         try:
-            async with db_pool.acquire() as conn:
-                # Delete old welcome messages
-                await conn.execute('DELETE FROM welcome_settings')
-                
-                # Insert new welcome message
-                await conn.execute('''
-                    INSERT INTO welcome_settings (message_type, file_id, caption)
-                    VALUES ($1, $2, $3)
-                ''', message_type, file_id, caption)
+            async with db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    # Delete old welcome messages
+                    await cur.execute('DELETE FROM welcome_settings')
+                    
+                    # Insert new welcome message
+                    await cur.execute('''
+                        INSERT INTO welcome_settings (message_type, file_id, caption)
+                        VALUES (%s, %s, %s)
+                    ''', (message_type, file_id, caption))
+                await conn.commit()
                 return True
         except Exception as e:
             print(f"Error saving welcome message: {e}")
@@ -354,7 +374,7 @@ async def delete_last_message(client, chat_id):
 def get_menu_markup():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔍 Preview Caption", callback_data="preview")],
+            [InlineKeyboardButton("📝 Preview Caption", callback_data="preview")],
             [InlineKeyboardButton("✏️ Set Caption", callback_data="set_caption")],
             [
                 InlineKeyboardButton("📺 Set Season", callback_data="set_season"),
@@ -500,7 +520,7 @@ async def help_command(client, message):
         
         "📋 <b>Menu Features:</b>\n\n"
         
-        "🔍 <b>Preview Caption</b>\n"
+        "📝 <b>Preview Caption</b>\n"
         "   • See how your caption will look\n"
         "   • Shows current settings preview\n\n"
         
@@ -654,7 +674,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             .replace("{quality}", quality)
 
         sent = await callback_query.message.reply(
-            f"🔍 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
+            f"📝 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
             f"<b>Your Current Settings:</b>\n"
             f"Season: {settings['season']}\n"
             f"Episode: {settings['episode']}\n"
@@ -866,9 +886,9 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             try:
                 preview_caption = (
                     "👁️ <b>Current Welcome Message Preview:</b>\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "─────────────────────\n\n"
                     f"{welcome_data['caption']}\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "─────────────────────\n\n"
                     f"<b>Type:</b> {welcome_data['message_type']}\n"
                     f"<b>Has Media:</b> ✅ Yes"
                 )
