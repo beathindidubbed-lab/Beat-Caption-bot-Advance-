@@ -14,9 +14,9 @@ from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 
 # Bot credentials and config
-API_ID = int(os.getenv('API_ID', '28318819'))
-API_HASH = os.getenv('API_HASH', '2996bb8e28a5bb09b56c16f6ca764c10')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8476862156:AAEMRJaLJ9PiN-8thOBr3hqGK2-PjzmWG_c')
+API_ID = int(os.getenv('API_ID', ''))
+API_HASH = os.getenv('API_HASH', '')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -1409,3 +1409,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("👋 Goodbye!")
+
