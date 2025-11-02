@@ -12,7 +12,6 @@ import aiohttp
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
-import traceback # Added for better error reporting
 
 # Bot credentials and config
 API_ID = int(os.getenv('API_ID', '28318819'))
@@ -32,21 +31,6 @@ if not ADMIN_IDS:
     ADMIN_IDS = [123456789]  # Replace with your actual Telegram user ID
 
 print(f"🔧 Admin IDs configured: {ADMIN_IDS}", flush=True)
-
-# ====================================================================
-# CRITICAL FIX: Custom Filter Definition (MISSING CODE ADDED)
-# ====================================================================
-
-def is_admin(_, __, m: Message):
-    """Checks if the message sender is in the ADMIN_IDS list."""
-    # Use m.from_user.id if the message is from a user, or m.sender_chat.id if from a channel (not common here)
-    if m.from_user and m.from_user.id:
-        return m.from_user.id in ADMIN_IDS
-    return False
-
-admin_filter = filters.create(is_admin)
-
-# ====================================================================
 
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
@@ -94,7 +78,6 @@ async def init_db():
     global db_pool
     if DATABASE_URL:
         try:
-            # Use 'timeout' parameter if needed, but not included in original code.
             db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=False)
             await db_pool.open()
             
@@ -195,8 +178,7 @@ async def get_user_settings(user_id, username=None, first_name=None):
                     row = await cur.fetchone()
                     
                     if row:
-                        # Get column names (requires fetchall/description logic if using non-DictCursor)
-                        # psycopg returns rows as tuples by default, map manually or rely on column order
+                        # Get column names
                         colnames = [desc[0] for desc in cur.description]
                         row_dict = dict(zip(colnames, row))
                         
@@ -624,6 +606,9 @@ async def help_command(client, message):
         "   • Reset episode counter to 1\n"
         "   • Useful when starting new season\n\n"
         
+        "❌ <b>Cancel</b>\n"
+        "   • Stop any ongoing input process\n\n"
+        
         "📤 <b>Video Upload Process:</b>\n"
         "1. Send video file to bot\n"
         "2. Bot applies your caption\n"
@@ -681,7 +666,7 @@ async def stats_command(client, message):
     await message.reply(stats_text, parse_mode=ParseMode.HTML)
 
 
-@app.on_message(filters.private & filters.command("admin") & admin_filter)
+@app.on_message(filters.private & filters.command("admin"))
 async def admin_command(client, message):
     """Admin command to see global stats and manage bot"""
     # Delete user's command
@@ -692,7 +677,7 @@ async def admin_command(client, message):
     
     user_id = message.from_user.id
     
-    # The filter ensures the user is admin, but the check is still necessary for fallback/safety
+    # Check if user is admin
     if user_id not in ADMIN_IDS:
         await message.reply(
             "❌ <b>Access Denied!</b>\n\n"
@@ -718,7 +703,7 @@ async def admin_command(client, message):
     await message.reply(admin_text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
 
 
-@app.on_callback_query(admin_filter)
+@app.on_callback_query()
 async def handle_buttons(client, callback_query: CallbackQuery):
     try:
         await callback_query.answer()
@@ -939,7 +924,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
 
     # Admin callbacks
     elif data == "admin_set_welcome":
-        # Check if user is admin (redundant due to filter, but safe)
+        # Check if user is admin
         if user_id not in ADMIN_IDS:
             await callback_query.answer("❌ Admin only!", show_alert=True)
             return
@@ -1075,7 +1060,7 @@ async def handle_forwarded(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation) & admin_filter)
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
 async def handle_media_for_welcome(client, message: Message):
     """Handle media messages for welcome message setup"""
     user_id = message.from_user.id
@@ -1132,7 +1117,7 @@ async def handle_media_for_welcome(client, message: Message):
     # If not setting welcome, ignore (let video handler take care of it)
 
 
-@app.on_message(filters.private & filters.text & ~filters.command("start") & ~filters.command("stats") & ~filters.command("admin") & ~filters.command("help") & ~filters.forwarded & admin_filter)
+@app.on_message(filters.private & filters.text & ~filters.command("start") & ~filters.command("stats") & ~filters.command("admin") & ~filters.command("help") & ~filters.forwarded)
 async def receive_input(client, message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -1392,11 +1377,12 @@ async def auto_forward(client, message):
                     pass
 
 
-# # Removed general catch_all handler to prevent log spam
-# @app.on_message(filters.private)
-# async def catch_all(client, message):
-#     print(f"🔔 Received ANY message from {message.from_user.id}: {message.text if message.text else 'non-text'}", flush=True)
-
+# Add a catch-all handler to see ALL messages
+@app.on_message(filters.private)
+async def catch_all(client, message):
+    print(f"🔔 Received ANY message from {message.from_user.id}: {message.text if message.text else 'non-text'}", flush=True)
+    
+    
 async def health_check(request):
     """Health check endpoint"""
     total_users = await get_all_users_count()
@@ -1441,7 +1427,8 @@ async def start_web_server():
     
     runner = web.AppRunner(web_app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    # Note: Use '0.0.0.0' for Render deployments
+    site = web.TCPSite(runner, '0.0.0.0', PORT) 
     await site.start()
     print(f"✅ Web server started on 0.0.0.0:{PORT}")
     print(f"🌐 Health check: http://0.0.0.0:{PORT}/health")
@@ -1456,16 +1443,16 @@ async def keep_alive():
 async def main():
     """Main function to run bot and web server"""
     
-    # Start web server FIRST
+    # 1. Start web server FIRST and concurrently
     print("🌐 Starting web server...", flush=True)
-    await start_web_server()
-    print(f"✅ Web server listening on port {PORT}", flush=True)
+    # The server must run in the background concurrently with the bot loop to satisfy Render's health check.
+    asyncio.create_task(start_web_server())
     
-    # Initialize database
+    # 2. Initialize database
     print("🗄️ Initializing database...", flush=True)
     await init_db()
     
-    # Start bot
+    # 3. Start bot
     print("🚀 Starting Pyrogram bot...", flush=True)
     print(f"🔑 Using API_ID: {API_ID}", flush=True)
     print(f"🔑 API_HASH length: {len(API_HASH) if API_HASH else 0}", flush=True)
@@ -1499,7 +1486,8 @@ async def main():
         print("⚠️ Keyboard interrupt received", flush=True)
     except Exception as e:
         print(f"❌ Error in main: {e}", file=sys.stderr, flush=True)
-        traceback.print_exc() # Print full stack trace
+        import traceback
+        traceback.print_exc()
     finally:
         print("🛑 Shutting down...", flush=True)
         try:
