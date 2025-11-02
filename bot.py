@@ -1,5 +1,5 @@
 import json
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from pathlib import Path
@@ -54,7 +54,7 @@ async def init_db():
     global db_pool
     if DATABASE_URL:
         try:
-            db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10)
+            db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=False)
             await db_pool.open()
             
             # Create tables
@@ -1348,24 +1348,47 @@ async def start_web_server():
 async def main():
     """Main function to run bot and web server"""
     
-    # Initialize database
-    await init_db()
-    
-    # Start web server
-    await start_web_server()
-    
-    # Start self-ping task
-    asyncio.create_task(self_ping())
-    
-    # Start bot
-    await app.start()
-    print("✅ Bot started successfully!")
-    print("🤖 Multi-user mode enabled")
-    print("👥 Each user has their own settings and target channel")
-    
-    # Keep running
-    await asyncio.Event().wait()
+    try:
+        # Initialize database
+        await init_db()
+        
+        # Start web server
+        await start_web_server()
+        
+        # Start self-ping task
+        asyncio.create_task(self_ping())
+        
+        # Start bot
+        print("🚀 Starting Pyrogram bot...")
+        await app.start()
+        print("✅ Bot started successfully!")
+        print(f"🤖 Bot username: @{app.me.username}")
+        print(f"🆔 Bot ID: {app.me.id}")
+        print("🤖 Multi-user mode enabled")
+        print("👥 Each user has their own settings and target channel")
+        print("📡 Bot is now listening for messages...")
+        
+        # Keep running using idle
+        await idle()
+        
+    except KeyboardInterrupt:
+        print("⚠️ Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Error in main: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if app.is_connected:
+            print("🛑 Stopping bot...")
+            await app.stop()
+        if db_pool:
+            print("🗄️ Closing database pool...")
+            await db_pool.close()
+        print("👋 Shutdown complete")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("👋 Goodbye!")
