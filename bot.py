@@ -12,6 +12,7 @@ import aiohttp
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
+import traceback # Added for better error reporting
 
 # Bot credentials and config
 API_ID = int(os.getenv('API_ID', '28318819'))
@@ -31,6 +32,21 @@ if not ADMIN_IDS:
     ADMIN_IDS = [123456789]  # Replace with your actual Telegram user ID
 
 print(f"🔧 Admin IDs configured: {ADMIN_IDS}", flush=True)
+
+# ====================================================================
+# CRITICAL FIX: Custom Filter Definition (MISSING CODE ADDED)
+# ====================================================================
+
+def is_admin(_, __, m: Message):
+    """Checks if the message sender is in the ADMIN_IDS list."""
+    # Use m.from_user.id if the message is from a user, or m.sender_chat.id if from a channel (not common here)
+    if m.from_user and m.from_user.id:
+        return m.from_user.id in ADMIN_IDS
+    return False
+
+admin_filter = filters.create(is_admin)
+
+# ====================================================================
 
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
@@ -78,6 +94,7 @@ async def init_db():
     global db_pool
     if DATABASE_URL:
         try:
+            # Use 'timeout' parameter if needed, but not included in original code.
             db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=False)
             await db_pool.open()
             
@@ -178,7 +195,8 @@ async def get_user_settings(user_id, username=None, first_name=None):
                     row = await cur.fetchone()
                     
                     if row:
-                        # Get column names
+                        # Get column names (requires fetchall/description logic if using non-DictCursor)
+                        # psycopg returns rows as tuples by default, map manually or rely on column order
                         colnames = [desc[0] for desc in cur.description]
                         row_dict = dict(zip(colnames, row))
                         
@@ -663,7 +681,7 @@ async def stats_command(client, message):
     await message.reply(stats_text, parse_mode=ParseMode.HTML)
 
 
-@app.on_message(filters.private & filters.command("admin"))
+@app.on_message(filters.private & filters.command("admin") & admin_filter)
 async def admin_command(client, message):
     """Admin command to see global stats and manage bot"""
     # Delete user's command
@@ -674,7 +692,7 @@ async def admin_command(client, message):
     
     user_id = message.from_user.id
     
-    # Check if user is admin
+    # The filter ensures the user is admin, but the check is still necessary for fallback/safety
     if user_id not in ADMIN_IDS:
         await message.reply(
             "❌ <b>Access Denied!</b>\n\n"
@@ -700,7 +718,7 @@ async def admin_command(client, message):
     await message.reply(admin_text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
 
 
-@app.on_callback_query()
+@app.on_callback_query(admin_filter)
 async def handle_buttons(client, callback_query: CallbackQuery):
     try:
         await callback_query.answer()
@@ -921,7 +939,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
 
     # Admin callbacks
     elif data == "admin_set_welcome":
-        # Check if user is admin
+        # Check if user is admin (redundant due to filter, but safe)
         if user_id not in ADMIN_IDS:
             await callback_query.answer("❌ Admin only!", show_alert=True)
             return
@@ -1057,7 +1075,7 @@ async def handle_forwarded(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation) & admin_filter)
 async def handle_media_for_welcome(client, message: Message):
     """Handle media messages for welcome message setup"""
     user_id = message.from_user.id
@@ -1114,7 +1132,7 @@ async def handle_media_for_welcome(client, message: Message):
     # If not setting welcome, ignore (let video handler take care of it)
 
 
-@app.on_message(filters.private & filters.text & ~filters.command("start") & ~filters.command("stats") & ~filters.command("admin") & ~filters.command("help") & ~filters.forwarded)
+@app.on_message(filters.private & filters.text & ~filters.command("start") & ~filters.command("stats") & ~filters.command("admin") & ~filters.command("help") & ~filters.forwarded & admin_filter)
 async def receive_input(client, message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -1374,10 +1392,11 @@ async def auto_forward(client, message):
                     pass
 
 
-# Add a catch-all handler to see ALL messages
-@app.on_message(filters.private)
-async def catch_all(client, message):
-    print(f"🔔 Received ANY message from {message.from_user.id}: {message.text if message.text else 'non-text'}", flush=True)
+# # Removed general catch_all handler to prevent log spam
+# @app.on_message(filters.private)
+# async def catch_all(client, message):
+#     print(f"🔔 Received ANY message from {message.from_user.id}: {message.text if message.text else 'non-text'}", flush=True)
+
 async def health_check(request):
     """Health check endpoint"""
     total_users = await get_all_users_count()
@@ -1479,9 +1498,8 @@ async def main():
     except KeyboardInterrupt:
         print("⚠️ Keyboard interrupt received", flush=True)
     except Exception as e:
-        print(f"❌ Error in main: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error in main: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc() # Print full stack trace
     finally:
         print("🛑 Shutting down...", flush=True)
         try:
