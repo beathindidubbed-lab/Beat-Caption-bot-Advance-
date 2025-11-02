@@ -1,7 +1,7 @@
 import sys
 
 import json
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from pathlib import Path
@@ -14,9 +14,9 @@ from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 
 # Bot credentials and config
-API_ID = int(os.getenv('API_ID', ''))
-API_HASH = os.getenv('API_HASH', '')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+API_ID = int(os.getenv('API_ID', '28318819'))
+API_HASH = os.getenv('API_HASH', '2996bb8e28a5bb09b56c16f6ca764c10')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8476862156:AAEMRJaLJ9PiN-8thOBr3hqGK2-PjzmWG_c')
 PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -30,13 +30,14 @@ DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
 # Database pool
 db_pool = None
 
-# Pyrogram app
+# Pyrogram app - Using in_memory=True to avoid session file issues
 app = Client(
     "auto_caption_bot", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    workers=4
+    workers=4,
+    in_memory=True  # Don't save session to file
 )
 
 print(f"🔧 Pyrogram Client initialized with API_ID: {API_ID}", flush=True)
@@ -433,17 +434,24 @@ def get_channel_set_markup():
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
+    print(f"📨 Received /start from user {message.from_user.id}", flush=True)
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Load or create user settings
-    settings = await get_user_settings(user_id, username, first_name)
+    try:
+        # Load or create user settings
+        settings = await get_user_settings(user_id, username, first_name)
+        print(f"✅ Settings loaded for user {user_id}", flush=True)
+    except Exception as e:
+        print(f"❌ Error loading settings: {e}", flush=True)
+        await message.reply("Error loading settings. Please try again.")
+        return
     
     try:
         await message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ Could not delete user message: {e}", flush=True)
     
     await delete_last_message(client, message.chat.id)
     
@@ -520,6 +528,12 @@ async def start(client, message):
 @app.on_message(filters.private & filters.command("help"))
 async def help_command(client, message):
     """Show help message with all commands"""
+    # Delete user's command
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    
     help_text = (
         "📚 <b>Bot Commands & Features</b>\n\n"
         
@@ -1360,53 +1374,64 @@ async def start_web_server():
 async def main():
     """Main function to run bot and web server"""
     
+    # Start web server FIRST
+    print("🌐 Starting web server...", flush=True)
+    await start_web_server()
+    print(f"✅ Web server listening on port {PORT}", flush=True)
+    
+    # Initialize database
+    print("🗄️ Initializing database...", flush=True)
+    await init_db()
+    
+    # Start self-ping task
+    ping_task = asyncio.create_task(self_ping())
+    
+    # Start bot
+    print("🚀 Starting Pyrogram bot...", flush=True)
+    print(f"🔑 Using API_ID: {API_ID}", flush=True)
+    print(f"🔑 API_HASH length: {len(API_HASH) if API_HASH else 0}", flush=True)
+    print(f"🔑 BOT_TOKEN length: {len(BOT_TOKEN) if BOT_TOKEN else 0}", flush=True)
+    
+    await app.start()
+    
+    # Get bot info
+    me = await app.get_me()
+    print("✅ Bot started successfully!", flush=True)
+    print(f"🤖 Bot username: @{me.username}", flush=True)
+    print(f"🆔 Bot ID: {me.id}", flush=True)
+    print(f"📛 Bot name: {me.first_name}", flush=True)
+    print("🤖 Multi-user mode enabled", flush=True)
+    print("👥 Each user has their own settings and target channel", flush=True)
+    print("📡 Bot is now listening for messages...", flush=True)
+    print("", flush=True)
+    print("=" * 50, flush=True)
+    print("✅ ALL SYSTEMS OPERATIONAL", flush=True)
+    print("=" * 50, flush=True)
+    sys.stdout.flush()
+    
+    # Keep running - proper way without idle()
     try:
-        # Start web server FIRST
-        print("🌐 Starting web server...", flush=True)
-        await start_web_server()
-        print(f"✅ Web server listening on port {PORT}", flush=True)
-        
-        # Initialize database
-        print("🗄️ Initializing database...", flush=True)
-        await init_db()
-        
-        # Start self-ping task
-        asyncio.create_task(self_ping())
-        
-        # Start bot
-        print("🚀 Starting Pyrogram bot...", flush=True)
-        await app.start()
-        print("✅ Bot started successfully!", flush=True)
-        print(f"🤖 Bot username: @{app.me.username}", flush=True)
-        print(f"🆔 Bot ID: {app.me.id}", flush=True)
-        print("🤖 Multi-user mode enabled", flush=True)
-        print("👥 Each user has their own settings and target channel", flush=True)
-        print("📡 Bot is now listening for messages...", flush=True)
-        sys.stdout.flush()
-        
-        # Keep running using idle
-        await idle()
-        
-    except KeyboardInterrupt:
-        print("⚠️ Bot stopped by user", flush=True)
-    except Exception as e:
-        print(f"❌ Error in main: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        sys.stdout.flush()
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        print("⚠️ Shutdown signal received", flush=True)
     finally:
+        print("🛑 Stopping bot...", flush=True)
+        ping_task.cancel()
+        try:
+            await ping_task
+        except asyncio.CancelledError:
+            pass
+        
         if app.is_connected:
-            print("🛑 Stopping bot...", flush=True)
             await app.stop()
+        
         if db_pool:
             print("🗄️ Closing database pool...", flush=True)
             await db_pool.close()
+        
         print("👋 Shutdown complete", flush=True)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("👋 Goodbye!")
-
+    asyncio.run(main())
