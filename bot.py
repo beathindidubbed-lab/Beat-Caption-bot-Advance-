@@ -48,11 +48,12 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     workers=4,
-    in_memory=True  # Don't save session to file
+    in_memory=True,  # Don't save session to file
+    sleep_threshold=60  # Prevent flood wait
 )
 
-print(f"🔧 Pyrogram Client initialized with API_ID: {API_ID}", flush=True)
-print(f"🔧 BOT_TOKEN present: {'Yes' if BOT_TOKEN else 'No'}", flush=True)
+print(f"🔧 Pyrogram Client initialized", flush=True)
+print(f"🔧 Bot will use token: {BOT_TOKEN[:20]}...", flush=True)
 
 # Track users waiting for input and last messages
 waiting_for_input = {}  # user_id -> input_type
@@ -447,7 +448,13 @@ def get_channel_set_markup():
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
-    print(f"📨 Received /start from user {message.from_user.id}", flush=True)
+    print(f"📨 ========================================", flush=True)
+    print(f"📨 RECEIVED /start COMMAND", flush=True)
+    print(f"📨 From user: {message.from_user.id}", flush=True)
+    print(f"📨 Username: @{message.from_user.username}", flush=True)
+    print(f"📨 First name: {message.from_user.first_name}", flush=True)
+    print(f"📨 ========================================", flush=True)
+    
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
@@ -1367,7 +1374,10 @@ async def auto_forward(client, message):
                     pass
 
 
-# Web server handlers
+# Add a catch-all handler to see ALL messages
+@app.on_message(filters.private)
+async def catch_all(client, message):
+    print(f"🔔 Received ANY message from {message.from_user.id}: {message.text if message.text else 'non-text'}", flush=True)
 async def health_check(request):
     """Health check endpoint"""
     total_users = await get_all_users_count()
@@ -1418,6 +1428,12 @@ async def start_web_server():
     print(f"🌐 Health check: http://0.0.0.0:{PORT}/health")
 
 
+async def keep_alive():
+    """Keep the bot running"""
+    while True:
+        await asyncio.sleep(3600)  # Sleep for 1 hour
+
+
 async def main():
     """Main function to run bot and web server"""
     
@@ -1430,74 +1446,54 @@ async def main():
     print("🗄️ Initializing database...", flush=True)
     await init_db()
     
-    # Start self-ping task
-    ping_task = asyncio.create_task(self_ping())
-    
     # Start bot
     print("🚀 Starting Pyrogram bot...", flush=True)
     print(f"🔑 Using API_ID: {API_ID}", flush=True)
     print(f"🔑 API_HASH length: {len(API_HASH) if API_HASH else 0}", flush=True)
     print(f"🔑 BOT_TOKEN length: {len(BOT_TOKEN) if BOT_TOKEN else 0}", flush=True)
     
-    await app.start()
-    
-    # Get bot info
-    me = await app.get_me()
-    print("✅ Bot started successfully!", flush=True)
-    print(f"🤖 Bot username: @{me.username}", flush=True)
-    print(f"🆔 Bot ID: {me.id}", flush=True)
-    print(f"📛 Bot name: {me.first_name}", flush=True)
-    print("🤖 Multi-user mode enabled", flush=True)
-    print("👥 Each user has their own settings and target channel", flush=True)
-    print("📡 Bot is now listening for messages...", flush=True)
-    print("", flush=True)
-    print("=" * 50, flush=True)
-    print("✅ ALL SYSTEMS OPERATIONAL", flush=True)
-    print("=" * 50, flush=True)
-    sys.stdout.flush()
-    
-    # Keep running - proper way without idle()
     try:
-        # Just wait forever - let the event loop handle everything
-        await asyncio.Future()  # This will run forever until cancelled
-    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
-        print("⚠️ Shutdown signal received", flush=True)
+        await app.start()
+        
+        # Get bot info
+        me = await app.get_me()
+        print("✅ Bot started successfully!", flush=True)
+        print(f"🤖 Bot username: @{me.username}", flush=True)
+        print(f"🆔 Bot ID: {me.id}", flush=True)
+        print(f"📛 Bot name: {me.first_name}", flush=True)
+        print("🤖 Multi-user mode enabled", flush=True)
+        print("👥 Each user has their own settings and target channel", flush=True)
+        print("📡 Bot is now listening for messages...", flush=True)
+        print("", flush=True)
+        print("=" * 50, flush=True)
+        print("✅ ALL SYSTEMS OPERATIONAL", flush=True)
+        print("=" * 50, flush=True)
+        sys.stdout.flush()
+        
+        # Start self-ping in background
+        asyncio.create_task(self_ping())
+        
+        # Keep alive
+        await keep_alive()
+        
+    except KeyboardInterrupt:
+        print("⚠️ Keyboard interrupt received", flush=True)
     except Exception as e:
-        print(f"❌ Unexpected error: {e}", flush=True)
+        print(f"❌ Error in main: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
     finally:
-        print("🛑 Starting graceful shutdown...", flush=True)
-        
-        # Cancel ping task
-        if not ping_task.done():
-            ping_task.cancel()
-            try:
-                await asyncio.wait_for(ping_task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-        
-        # Stop bot gracefully
-        if app.is_connected:
-            try:
-                print("🛑 Stopping Pyrogram client...", flush=True)
-                await asyncio.wait_for(app.stop(), timeout=5.0)
-                print("✅ Pyrogram stopped", flush=True)
-            except asyncio.TimeoutError:
-                print("⚠️ Pyrogram stop timeout", flush=True)
-            except Exception as e:
-                print(f"⚠️ Error stopping Pyrogram: {e}", flush=True)
-        
-        # Close database pool
+        print("🛑 Shutting down...", flush=True)
+        try:
+            await app.stop()
+        except:
+            pass
         if db_pool:
             try:
-                print("🗄️ Closing database pool...", flush=True)
-                await asyncio.wait_for(db_pool.close(), timeout=5.0)
-                print("✅ Database pool closed", flush=True)
-            except asyncio.TimeoutError:
-                print("⚠️ Database close timeout", flush=True)
-            except Exception as e:
-                print(f"⚠️ Error closing database: {e}", flush=True)
-        
-        print("👋 Shutdown complete", flush=True)
+                await db_pool.close()
+            except:
+                pass
+        print("👋 Goodbye", flush=True)
 
 
 if __name__ == "__main__":
