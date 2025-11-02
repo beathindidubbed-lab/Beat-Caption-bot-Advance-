@@ -21,6 +21,17 @@ PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 
+# Admin IDs - Add your Telegram user IDs here
+ADMIN_IDS = [
+    int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()
+]
+
+# If no admin IDs in environment variable, you can add them manually here as backup
+if not ADMIN_IDS:
+    ADMIN_IDS = [123456789]  # Replace with your actual Telegram user ID
+
+print(f"🔧 Admin IDs configured: {ADMIN_IDS}", flush=True)
+
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
 DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
@@ -325,7 +336,9 @@ async def get_all_users_count():
                     count = await cur.fetchone()
                     return count[0] if count else 0
         except Exception as e:
-            print(f"Error getting user count: {e}")
+            print(f"⚠️ Error getting user count: {e}", flush=True)
+            # Return 0 instead of crashing
+            return 0
     return 0
 
 
@@ -615,6 +628,12 @@ async def help_command(client, message):
 
 @app.on_message(filters.private & filters.command("stats"))
 async def stats_command(client, message):
+    # Delete user's command
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    
     user_id = message.from_user.id
     settings = await get_user_settings(user_id)
     total, today = await get_user_upload_stats(user_id)
@@ -640,13 +659,22 @@ async def stats_command(client, message):
 @app.on_message(filters.private & filters.command("admin"))
 async def admin_command(client, message):
     """Admin command to see global stats and manage bot"""
+    # Delete user's command
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    
     user_id = message.from_user.id
     
-    # You can add specific admin user IDs here
-    ADMIN_IDS = [user_id]  # Add your admin user IDs
-    
+    # Check if user is admin
     if user_id not in ADMIN_IDS:
-        await message.reply("❌ You don't have permission to use this command.")
+        await message.reply(
+            "❌ <b>Access Denied!</b>\n\n"
+            "You don't have permission to use this command.\n"
+            "This command is only available to bot administrators.",
+            parse_mode=ParseMode.HTML
+        )
         return
     
     total_users = await get_all_users_count()
@@ -656,7 +684,8 @@ async def admin_command(client, message):
         f"📊 <b>Global Statistics:</b>\n"
         f"• Total Users: <code>{total_users}</code>\n"
         f"• Active Users: <code>{total_users}</code>\n\n"
-        f"🤖 Bot Status: ✅ Running\n\n"
+        f"🤖 Bot Status: ✅ Running\n"
+        f"👤 Your Admin ID: <code>{user_id}</code>\n\n"
         f"⚙️ <b>Admin Options:</b>\n"
         f"Use the buttons below to manage bot settings."
     )
@@ -886,7 +915,6 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     # Admin callbacks
     elif data == "admin_set_welcome":
         # Check if user is admin
-        ADMIN_IDS = [user_id]  # You should load this from config
         if user_id not in ADMIN_IDS:
             await callback_query.answer("❌ Admin only!", show_alert=True)
             return
@@ -1228,6 +1256,9 @@ async def receive_input(client, message):
 async def auto_forward(client, message):
     user_id = message.from_user.id
     
+    # Delete user's video message after processing
+    delete_user_video = True
+    
     # Get user-specific lock
     user_lock = get_user_lock(user_id)
     
@@ -1284,7 +1315,7 @@ async def auto_forward(client, message):
                 settings['target_chat_id']
             )
 
-            await message.reply(
+            reply_msg = await message.reply(
                 f"✅ <b>Video forwarded successfully!</b>\n\n"
                 f"📺 Season: {settings['season']}\n"
                 f"🎬 Episode: {settings['episode']}\n"
@@ -1293,6 +1324,13 @@ async def auto_forward(client, message):
                 f"📊 Progress: {settings['video_count'] + 1}/{len(settings['selected_qualities'])} videos for this episode",
                 parse_mode=ParseMode.HTML
             )
+            
+            # Delete the reply message after 5 seconds
+            await asyncio.sleep(5)
+            try:
+                await reply_msg.delete()
+            except Exception:
+                pass
 
             settings["video_count"] += 1
 
@@ -1318,6 +1356,15 @@ async def auto_forward(client, message):
                 f"3. Try setting the channel again with /start",
                 parse_mode=ParseMode.HTML
             )
+            delete_user_video = False  # Keep video if there was an error
+        
+        finally:
+            # Delete user's video message to keep chat clean
+            if delete_user_video:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
 
 
 # Web server handlers
@@ -1411,24 +1458,44 @@ async def main():
     
     # Keep running - proper way without idle()
     try:
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
+        # Just wait forever - let the event loop handle everything
+        await asyncio.Future()  # This will run forever until cancelled
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
         print("⚠️ Shutdown signal received", flush=True)
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}", flush=True)
     finally:
-        print("🛑 Stopping bot...", flush=True)
-        ping_task.cancel()
-        try:
-            await ping_task
-        except asyncio.CancelledError:
-            pass
+        print("🛑 Starting graceful shutdown...", flush=True)
         
+        # Cancel ping task
+        if not ping_task.done():
+            ping_task.cancel()
+            try:
+                await asyncio.wait_for(ping_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        
+        # Stop bot gracefully
         if app.is_connected:
-            await app.stop()
+            try:
+                print("🛑 Stopping Pyrogram client...", flush=True)
+                await asyncio.wait_for(app.stop(), timeout=5.0)
+                print("✅ Pyrogram stopped", flush=True)
+            except asyncio.TimeoutError:
+                print("⚠️ Pyrogram stop timeout", flush=True)
+            except Exception as e:
+                print(f"⚠️ Error stopping Pyrogram: {e}", flush=True)
         
+        # Close database pool
         if db_pool:
-            print("🗄️ Closing database pool...", flush=True)
-            await db_pool.close()
+            try:
+                print("🗄️ Closing database pool...", flush=True)
+                await asyncio.wait_for(db_pool.close(), timeout=5.0)
+                print("✅ Database pool closed", flush=True)
+            except asyncio.TimeoutError:
+                print("⚠️ Database close timeout", flush=True)
+            except Exception as e:
+                print(f"⚠️ Error closing database: {e}", flush=True)
         
         print("👋 Shutdown complete", flush=True)
 
