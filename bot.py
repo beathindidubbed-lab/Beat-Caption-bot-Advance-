@@ -606,9 +606,6 @@ async def help_command(client, message):
         "   • Reset episode counter to 1\n"
         "   • Useful when starting new season\n\n"
         
-        "❌ <b>Cancel</b>\n"
-        "   • Stop any ongoing input process\n\n"
-        
         "📤 <b>Video Upload Process:</b>\n"
         "1. Send video file to bot\n"
         "2. Bot applies your caption\n"
@@ -1381,8 +1378,6 @@ async def auto_forward(client, message):
 @app.on_message(filters.private)
 async def catch_all(client, message):
     print(f"🔔 Received ANY message from {message.from_user.id}: {message.text if message.text else 'non-text'}", flush=True)
-    
-    
 async def health_check(request):
     """Health check endpoint"""
     total_users = await get_all_users_count()
@@ -1427,11 +1422,10 @@ async def start_web_server():
     
     runner = web.AppRunner(web_app)
     await runner.setup()
-    # Note: Use '0.0.0.0' for Render deployments
-    site = web.TCPSite(runner, '0.0.0.0', PORT) 
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✅ Web server started on 0.0.0.0:{PORT}")
-    print(f"🌐 Health check: http://0.0.0.0:{PORT}/health")
+    print(f"✅ Web server started on 0.0.0.0:{PORT}", flush=True)
+    print(f"🌐 Health check: http://0.0.0.0:{PORT}/health", flush=True)
 
 
 async def keep_alive():
@@ -1443,16 +1437,16 @@ async def keep_alive():
 async def main():
     """Main function to run bot and web server"""
     
-    # 1. Start web server FIRST and concurrently
+    # Start web server FIRST (await it properly)
     print("🌐 Starting web server...", flush=True)
-    # The server must run in the background concurrently with the bot loop to satisfy Render's health check.
-    asyncio.create_task(start_web_server())
+    await start_web_server()
+    print(f"✅ Web server listening on port {PORT}", flush=True)
     
-    # 2. Initialize database
+    # Initialize database
     print("🗄️ Initializing database...", flush=True)
     await init_db()
     
-    # 3. Start bot
+    # Start bot
     print("🚀 Starting Pyrogram bot...", flush=True)
     print(f"🔑 Using API_ID: {API_ID}", flush=True)
     print(f"🔑 API_HASH length: {len(API_HASH) if API_HASH else 0}", flush=True)
@@ -1485,7 +1479,7 @@ async def main():
     except KeyboardInterrupt:
         print("⚠️ Keyboard interrupt received", flush=True)
     except Exception as e:
-        print(f"❌ Error in main: {e}", file=sys.stderr, flush=True)
+        print(f"❌ Error in main: {e}", flush=True)
         import traceback
         traceback.print_exc()
     finally:
