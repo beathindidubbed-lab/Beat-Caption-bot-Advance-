@@ -907,42 +907,43 @@ async def handle_media_for_welcome(client, message: Message):
         pass
     
     await delete_last_message(client, message.chat.id)
+    
+    message_type = None
+    file_id = None
+    caption = message.caption or "Welcome!"
+    
+    if message.photo:
+        message_type = "photo"
+        file_id = message.photo.file_id
+    elif message.video:
+        message_type = "video"
+        file_id = message.video.file_id
+    elif message.animation:
+        message_type = "animation"
+        file_id = message.animation.file_id
+    
+    if message_type and file_id:
+        success = await save_welcome_message(message_type, file_id, caption)
         
-        message_type = None
-        file_id = None
-        caption = message.caption or "Welcome!"
-        
-        if message.photo:
-            message_type = "photo"
-            file_id = message.photo.file_id
-        elif message.video:
-            message_type = "video"
-            file_id = message.video.file_id
-        elif message.animation:
-            message_type = "animation"
-            file_id = message.animation.file_id
-        
-        if message_type and file_id:
-            success = await save_welcome_message(message_type, file_id, caption)
-            
-            if success:
-                del waiting_for_input[user_id]
-                sent = await client.send_message(
-                    message.chat.id,
-                    f"✅ <b>Welcome message updated!</b>\n\n"
-                    f"📝 Type: {message_type}",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_admin_menu_markup()
-                )
-                last_bot_messages[message.chat.id] = sent.id
+        if success:
+            del waiting_for_input[user_id]
+            sent = await client.send_message(
+                message.chat.id,
+                f"✅ <b>Welcome message updated!</b>\n\n"
+                f"📝 Type: {message_type}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_admin_menu_markup()
+            )
+            last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & filters.text & ~filters.command(None) & ~filters.forwarded)
+@app.on_message(filters.private & filters.text & ~filters.forwarded)
 async def receive_input(client, message):
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    if user_id not in waiting_for_input:
+    # Ignore if not waiting for input or if it's a command
+    if user_id not in waiting_for_input or message.text.startswith('/'):
         return
 
     try:
@@ -1032,9 +1033,13 @@ async def receive_input(client, message):
             last_bot_messages[chat_id] = sent.id
 
 
-@app.on_message(filters.private & filters.video & ~filters.command(None))
+@app.on_message(filters.private & filters.video)
 async def auto_forward(client, message):
     user_id = message.from_user.id
+    
+    # Ignore if waiting for input
+    if user_id in waiting_for_input:
+        return
     
     user_lock = get_user_lock(user_id)
     
