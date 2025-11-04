@@ -893,17 +893,20 @@ async def handle_forwarded(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation) & ~filters.command(None))
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
 async def handle_media_for_welcome(client, message: Message):
     user_id = message.from_user.id
     
-    if user_id in waiting_for_input and waiting_for_input[user_id] == "admin_welcome":
-        try:
-            await message.delete()
-        except:
-            pass
-        
-        await delete_last_message(client, message.chat.id)
+    # Only process if admin is setting welcome message
+    if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
+        return
+    
+    try:
+        await message.delete()
+    except:
+        pass
+    
+    await delete_last_message(client, message.chat.id)
         
         message_type = None
         file_id = None
@@ -1101,6 +1104,21 @@ async def auto_forward(client, message):
             )
 
 
+async def telegram_webhook(request):
+    """Handle incoming webhook updates from Telegram"""
+    try:
+        update = await request.json()
+        logger.info(f"📨 Webhook received update: {update.get('update_id', 'unknown')}")
+        
+        # Process the update with Pyrogram
+        await app.dispatcher.updates_queue.put(update)
+        
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        return web.Response(status=500)
+
+
 async def health_check(request):
     total_users = await get_all_users_count()
     return web.Response(text=f"Bot running! Users: {total_users}", content_type='text/plain')
@@ -1111,8 +1129,44 @@ async def stats_endpoint(request):
     return web.json_response({
         'status': 'running',
         'total_users': total_users,
-        'timestamp': datetime.utcnow().isoformat()
+        'timestamp': datetime.utcnow().isoformat(),
+        'webhook': WEBHOOK_URL if WEBHOOK_URL else 'polling'
     })
+
+
+async def setup_webhook():
+    """Set up Telegram webhook"""
+    if not WEBHOOK_URL:
+        logger.warning("⚠️ WEBHOOK_URL not set, using polling mode")
+        return False
+    
+    try:
+        # Delete existing webhook
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("🗑️ Deleted old webhook")
+        
+        # Set new webhook
+        success = await app.bot.set_webhook(
+            url=WEBHOOK_URL,
+            drop_pending_updates=True
+        )
+        
+        if success:
+            logger.info(f"✅ Webhook set successfully: {WEBHOOK_URL}")
+            
+            # Verify webhook
+            webhook_info = await app.bot.get_webhook_info()
+            logger.info(f"📡 Webhook info: {webhook_info.url}")
+            logger.info(f"📊 Pending updates: {webhook_info.pending_update_count}")
+            
+            return True
+        else:
+            logger.error("❌ Failed to set webhook")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Webhook setup error: {e}")
+        return False
 
 
 async def self_ping():
@@ -1129,6 +1183,11 @@ async def self_ping():
 
 
 async def start_web_server():
+    # Add webhook endpoint
+    if WEBHOOK_URL:
+        web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
+        logger.info(f"🔗 Webhook endpoint: {WEBHOOK_PATH}")
+    
     web_app.router.add_get('/health', health_check)
     web_app.router.add_get('/', health_check)
     web_app.router.add_get('/stats', stats_endpoint)
@@ -1157,6 +1216,17 @@ async def main():
         
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
+        
+        # Setup webhook if URL is provided
+        if WEBHOOK_URL:
+            webhook_success = await setup_webhook()
+            if webhook_success:
+                logger.info("🔗 Running in WEBHOOK mode")
+            else:
+                logger.warning("⚠️ Webhook setup failed, falling back to POLLING mode")
+        else:
+            logger.info("📡 Running in POLLING mode")
+        
         logger.info("=" * 50)
         logger.info("✅ ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 50)
@@ -1174,6 +1244,9 @@ async def main():
     finally:
         logger.info("🛑 Shutting down...")
         try:
+            if WEBHOOK_URL:
+                await app.bot.delete_webhook()
+                logger.info("🗑️ Webhook deleted")
             await app.stop()
         except:
             pass
