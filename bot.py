@@ -1109,21 +1109,22 @@ async def auto_forward(client, message):
             )
 
 # ----------------------------------------------------------------------
-# FIX APPLIED: Replaced the non-existent 'app.updates.put' with the 
-# correct 'asyncio.create_task(app.invoke_update(update_dict))'
+# FIX APPLIED: Replaced the non-existent 'app.invoke_update' with the 
+# reliable, non-blocking low-level queue access for Pyrogram 2.x.
 # ----------------------------------------------------------------------
 
 async def telegram_webhook(request):
-    """Handle incoming webhook updates from Telegram using Pyrogram's internal dispatching."""
+    """Handle incoming webhook updates from Telegram using Pyrogram's internal dispatching queue."""
     try:
         update_dict = await request.json()
         update_id = update_dict.get('update_id', 'unknown')
         
         logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        # This is the correct, non-blocking way to feed raw updates 
-        # to the modern Pyrogram client (v2.x).
-        asyncio.create_task(app.invoke_update(update_dict))
+        # This is the most reliable low-level, non-blocking way to feed raw updates 
+        # into the Pyrogram Dispatcher's queue across Pyrogram 2.x versions.
+        # put_nowait() is synchronous and ensures the webhook responds immediately.
+        app.dispatcher.updates_queue.put_nowait(update_dict) 
 
         # Always return a 200 OK response quickly to Telegram
         return web.Response(status=200, text="OK")
