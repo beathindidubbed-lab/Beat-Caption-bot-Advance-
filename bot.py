@@ -73,9 +73,6 @@ waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
 
-# Web server
-web_app = web.Application()
-
 
 def get_user_lock(user_id):
     """Get or create a lock for a specific user"""
@@ -1214,8 +1211,8 @@ async def telegram_webhook(request):
         
         logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        # --- FIX: Use app.feed_update() to pass raw update to Pyrogram dispatcher ---
-        asyncio.create_task(app.feed_update(update_dict))
+        # --- FIX: Use app.process_updates([update_dict]) to pass raw update to Pyrogram dispatcher ---
+        asyncio.create_task(app.process_updates([update_dict]))
         
         return web.Response(status=200, text="OK")
     except Exception as e:
