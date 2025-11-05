@@ -1166,7 +1166,7 @@ async def process_update_manually(update_dict):
             
             try:
                 # Create Message object using Pyrogram's internal parser
-                message = types.Message._parse(app, msg_data, {}, None)
+                message = await types.Message._parse(app, msg_data, {}, None)
                 logger.info(f"✅ Message object created: ID={message.id}, User={message.from_user.id if message.from_user else 'N/A'}")
                 
                 # Get all handlers
@@ -1400,3 +1400,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
