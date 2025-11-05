@@ -1108,9 +1108,10 @@ async def auto_forward(client, message):
                 parse_mode=ParseMode.HTML
             )
 
+
 # ----------------------------------------------------------------------
-# FIX APPLIED: Replaced the non-existent 'app.invoke_update' with the 
-# reliable, non-blocking low-level queue access for Pyrogram 2.x.
+# FINAL FIX: Using app.dispatcher.updates_queue.put_nowait() to handle 
+# raw webhook updates reliably in Pyrogram 2.x
 # ----------------------------------------------------------------------
 
 async def telegram_webhook(request):
@@ -1123,7 +1124,7 @@ async def telegram_webhook(request):
         
         # This is the most reliable low-level, non-blocking way to feed raw updates 
         # into the Pyrogram Dispatcher's queue across Pyrogram 2.x versions.
-        # put_nowait() is synchronous and ensures the webhook responds immediately.
+        # put_nowait() is synchronous and ensures the webhook responds immediately (200 OK).
         app.dispatcher.updates_queue.put_nowait(update_dict) 
 
         # Always return a 200 OK response quickly to Telegram
@@ -1133,7 +1134,7 @@ async def telegram_webhook(request):
         # Returning 200 OK prevents Telegram from resending the update repeatedly.
         return web.Response(status=200, text="OK")
 
-# The function 'process_update_manually' has been REMOVED.
+# The redundant and error-prone process_update_manually function has been removed.
 # ----------------------------------------------------------------------
 
 
