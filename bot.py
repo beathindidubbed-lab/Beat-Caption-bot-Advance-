@@ -72,6 +72,9 @@ waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
 
+# Web server
+web_app = web.Application()
+
 
 def get_user_lock(user_id):
     """Get or create a lock for a specific user"""
@@ -1114,18 +1117,24 @@ async def telegram_webhook(request):
         
         logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        # CORRECT FIX: Since 'app.process_update' is not available on the Client object,
-        # we bypass the high-level helper and directly push the raw Bot API JSON
-        # dictionary into Pyrogram's internal updates queue for processing.
+        # FIX: The correct way to feed the raw update dictionary to Pyrogram's
+        # dispatch system is to place it directly into the client's internal updates queue.
         if hasattr(app, "updates"):
             asyncio.create_task(app.updates.put(update_dict))
+            logger.info(f"✅ Update ID {update_id} queued for Pyrogram processing.")
         else:
             logger.error("❌ Cannot process update: Pyrogram updates queue not accessible.")
 
+        # Always return a 200 OK status to Telegram immediately.
         return web.Response(status=200, text="OK")
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        # Still return 200 OK to prevent Telegram from retrying
         return web.Response(status=200, text="OK")
+
+
+# DELETED: The entire 'process_update_manually' function was removed here 
+# as it is no longer needed and caused errors.
 
 
 async def health_check(request):
