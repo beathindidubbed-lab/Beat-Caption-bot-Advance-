@@ -4,3 +4,22 @@ tgcrypto==1.2.5
 aiohttp==3.10.5
 psycopg[binary]>=3.2.0
 psycopg-pool>=3.2.0
+httpx==0.27.0
+```
+
+## ✅ Changes Made:
+
+1. **Fixed webhook setup** - Using direct Telegram Bot API calls via `httpx`
+2. **Better error handling** - Shows detailed webhook errors
+3. **Proper cleanup** - Deletes webhook on shutdown
+4. **Added httpx** - HTTP client for Telegram API calls
+
+## 🚀 Deploy with updated requirements.txt
+
+After deploying, you should see:
+```
+🗑️ Deleted old webhook
+✅ Webhook set successfully: https://beat-caption-bot.onrender.com/webhook/...
+📡 Webhook URL: https://beat-caption-bot.onrender.com/webhook/...
+📊 Pending updates: 0
+🔗 Running in WEBHOOK mode
