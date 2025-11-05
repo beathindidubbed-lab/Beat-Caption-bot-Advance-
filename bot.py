@@ -22,9 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot credentials and config
-API_ID = int(os.getenv('API_ID', '28318819'))
-API_HASH = os.getenv('API_HASH', '2996bb8e28a5bb09b56c16f6ca764c10')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8476862156:AAEMRJaLJ9PiN-8thOBr3hqGK2-PjzmWG_c')
+API_ID = int(os.getenv('API_ID', ''))
+API_HASH = os.getenv('API_HASH', '')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -1155,46 +1155,78 @@ async def process_update_manually(update_dict):
     """Manually process updates from webhook"""
     try:
         from pyrogram.handlers import MessageHandler, CallbackQueryHandler
-        from pyrogram import types, filters as pyrogram_filters
+        from pyrogram import types
         
         # Handle messages
         if 'message' in update_dict:
             msg_data = update_dict['message']
             
-            # Create Message object
-            message = types.Message._parse(app, msg_data, {}, None)
+            logger.info(f"📝 Message data keys: {msg_data.keys()}")
+            logger.info(f"📝 Message text: {msg_data.get('text', 'N/A')}")
             
-            # Check and trigger handlers
-            for group in sorted(app.dispatcher.groups.keys()):
-                for handler in app.dispatcher.groups[group]:
-                    if isinstance(handler, MessageHandler):
-                        # Check if handler's filters match
-                        try:
-                            if await handler.filters(app, message):
-                                logger.info(f"✅ Triggering handler: {handler.callback.__name__}")
-                                await handler.callback(app, message)
-                                break
-                        except Exception as e:
-                            logger.error(f"Handler error: {e}", exc_info=True)
+            try:
+                # Create Message object using Pyrogram's internal parser
+                message = types.Message._parse(app, msg_data, {}, None)
+                logger.info(f"✅ Message object created: ID={message.id}, User={message.from_user.id if message.from_user else 'N/A'}")
+                
+                # Get all handlers
+                handler_count = 0
+                for group in sorted(app.dispatcher.groups.keys()):
+                    handlers = app.dispatcher.groups[group]
+                    logger.info(f"🔍 Checking group {group} with {len(handlers)} handlers")
+                    
+                    for handler in handlers:
+                        if isinstance(handler, MessageHandler):
+                            handler_count += 1
+                            handler_name = handler.callback.__name__
+                            logger.info(f"  └─ Checking handler: {handler_name}")
+                            
+                            try:
+                                # Check if filters match
+                                if handler.filters:
+                                    filter_result = await handler.filters(app, message)
+                                    logger.info(f"     Filter result: {filter_result}")
+                                    
+                                    if filter_result:
+                                        logger.info(f"✅ EXECUTING handler: {handler_name}")
+                                        await handler.callback(app, message)
+                                        logger.info(f"✅ Handler {handler_name} completed")
+                                        break
+                                else:
+                                    # No filters, always execute
+                                    logger.info(f"✅ EXECUTING handler (no filters): {handler_name}")
+                                    await handler.callback(app, message)
+                                    break
+                            except Exception as e:
+                                logger.error(f"❌ Handler {handler_name} error: {e}", exc_info=True)
+                
+                logger.info(f"📊 Total message handlers checked: {handler_count}")
+                
+            except Exception as e:
+                logger.error(f"❌ Error creating Message object: {e}", exc_info=True)
         
         # Handle callback queries
         elif 'callback_query' in update_dict:
             cb_data = update_dict['callback_query']
             
-            # Create CallbackQuery object
-            callback_query = types.CallbackQuery._parse(app, cb_data, {})
-            
-            # Trigger callback query handlers
-            for group in sorted(app.dispatcher.groups.keys()):
-                for handler in app.dispatcher.groups[group]:
-                    if isinstance(handler, CallbackQueryHandler):
-                        try:
-                            if handler.filters is None or await handler.filters(app, callback_query):
-                                logger.info(f"✅ Triggering callback handler")
-                                await handler.callback(app, callback_query)
-                                break
-                        except Exception as e:
-                            logger.error(f"Callback handler error: {e}", exc_info=True)
+            try:
+                # Create CallbackQuery object
+                callback_query = types.CallbackQuery._parse(app, cb_data, {})
+                logger.info(f"✅ CallbackQuery object created: {callback_query.data}")
+                
+                # Trigger callback query handlers
+                for group in sorted(app.dispatcher.groups.keys()):
+                    for handler in app.dispatcher.groups[group]:
+                        if isinstance(handler, CallbackQueryHandler):
+                            try:
+                                if handler.filters is None or await handler.filters(app, callback_query):
+                                    logger.info(f"✅ Triggering callback handler")
+                                    await handler.callback(app, callback_query)
+                                    break
+                            except Exception as e:
+                                logger.error(f"❌ Callback handler error: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"❌ Error creating CallbackQuery object: {e}", exc_info=True)
     
     except Exception as e:
         logger.error(f"❌ Error processing update manually: {e}", exc_info=True)
