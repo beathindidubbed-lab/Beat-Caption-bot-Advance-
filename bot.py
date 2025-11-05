@@ -1293,7 +1293,7 @@ async def cleanup_task(context: ContextTypes.DEFAULT_TYPE):
 
 def keep_alive():
     while True:
-        time.sleep(300)
+        time.sleep(840)
         try:
             requests.get("https://www.google.com/robots.txt", timeout=10)
         except:
@@ -1396,53 +1396,19 @@ def main():
 
     if application.job_queue:
         application.job_queue.run_repeating(cleanup_task, interval=600, first=10)
-# === Health Check Server for UptimeRobot / Render ===
-import threading
-from aiohttp import web
 
-async def health(request):
-    """Responds with 200 OK for uptime pings."""
-    return web.Response(text="OK")
-
-def start_health_server():
-    """
-    Runs a small aiohttp web server on "/" for uptime checks.
-    Render counts this external ping as valid traffic.
-    """
-    app = web.Application()
-    app.router.add_get("/", health)
-
-    port = int(os.environ.get("PORT", 8080))
-    threading.Thread(
-        target=lambda: web.run_app(app, host="0.0.0.0", port=port),
-        daemon=True
-    ).start()
-# =====================================================
-
-
-    
-if WEBHOOK_URL and BOT_TOKEN:
-    # Start the simple HTTP health endpoint for UptimeRobot
-    start_health_server()
-
-    # (Optional) simple internal ping thread — harmless but not needed for uptime
-    keep_alive_thread = Thread(target=keep_alive, daemon=True)
-    keep_alive_thread.start()
-
-    # Start Telegram webhook listener
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-        webhook_url=WEBHOOK_URL + BOT_TOKEN
-    )
-else:
-    # Fallback: polling mode (for local debugging)
-    start_health_server()
-    application.run_polling()
+    if WEBHOOK_URL and BOT_TOKEN:
+        keep_alive_thread = Thread(target=keep_alive, daemon=True)
+        keep_alive_thread.start()
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=WEBHOOK_URL + BOT_TOKEN
+        )
+    else:
+        application.run_polling()
 
 if __name__ == "__main__":
     main()
-
-
 
