@@ -22,9 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot credentials and config
-API_ID = int(os.getenv('API_ID', ''))
-API_HASH = os.getenv('API_HASH', '')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+API_ID = int(os.getenv('API_ID', '28318819'))
+API_HASH = os.getenv('API_HASH', '2996bb8e28a5bb09b56c16f6ca764c10')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8476862156:AAEMRJaLJ9PiN-8thOBr3hqGK2-PjzmWG_c')
 PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -1112,16 +1112,92 @@ async def auto_forward(client, message):
 async def telegram_webhook(request):
     """Handle incoming webhook updates from Telegram"""
     try:
-        update = await request.json()
-        logger.info(f"📨 Webhook received update: {update.get('update_id', 'unknown')}")
+        update_dict = await request.json()
+        update_id = update_dict.get('update_id', 'unknown')
         
-        # Process the update with Pyrogram
-        await app.dispatcher.updates_queue.put(update)
+        logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        return web.Response(status=200)
+        # Convert dict to Pyrogram objects and process
+        from pyrogram import types
+        
+        # Handle regular messages
+        if 'message' in update_dict:
+            msg_dict = update_dict['message']
+            logger.info(f"   └─ Processing message from user {msg_dict.get('from', {}).get('id')}")
+            
+            # Create a raw update for Pyrogram to process
+            import pyrogram.raw.types as raw_types
+            import pyrogram.raw.functions as raw_functions
+            
+            # Put the raw update in the queue for processing
+            update_obj = raw_types.UpdateNewMessage(
+                message=msg_dict,
+                pts=0,
+                pts_count=0
+            )
+            
+            # Trigger manual processing
+            asyncio.create_task(process_update_manually(update_dict))
+        
+        # Handle callback queries
+        elif 'callback_query' in update_dict:
+            cb_dict = update_dict['callback_query']
+            logger.info(f"   └─ Processing callback from user {cb_dict.get('from', {}).get('id')}")
+            asyncio.create_task(process_update_manually(update_dict))
+        
+        return web.Response(status=200, text="OK")
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
-        return web.Response(status=500)
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        return web.Response(status=200, text="OK")
+
+
+async def process_update_manually(update_dict):
+    """Manually process updates from webhook"""
+    try:
+        from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+        from pyrogram import types, filters as pyrogram_filters
+        
+        # Handle messages
+        if 'message' in update_dict:
+            msg_data = update_dict['message']
+            
+            # Create Message object
+            message = types.Message._parse(app, msg_data, {}, None)
+            
+            # Check and trigger handlers
+            for group in sorted(app.dispatcher.groups.keys()):
+                for handler in app.dispatcher.groups[group]:
+                    if isinstance(handler, MessageHandler):
+                        # Check if handler's filters match
+                        try:
+                            if await handler.filters(app, message):
+                                logger.info(f"✅ Triggering handler: {handler.callback.__name__}")
+                                await handler.callback(app, message)
+                                break
+                        except Exception as e:
+                            logger.error(f"Handler error: {e}", exc_info=True)
+        
+        # Handle callback queries
+        elif 'callback_query' in update_dict:
+            cb_data = update_dict['callback_query']
+            
+            # Create CallbackQuery object
+            callback_query = types.CallbackQuery._parse(app, cb_data, {})
+            
+            # Trigger callback query handlers
+            for group in sorted(app.dispatcher.groups.keys()):
+                for handler in app.dispatcher.groups[group]:
+                    if isinstance(handler, CallbackQueryHandler):
+                        try:
+                            if handler.filters is None or await handler.filters(app, callback_query):
+                                logger.info(f"✅ Triggering callback handler")
+                                await handler.callback(app, callback_query)
+                                break
+                        except Exception as e:
+                            logger.error(f"Callback handler error: {e}", exc_info=True)
+    
+    except Exception as e:
+        logger.error(f"❌ Error processing update manually: {e}", exc_info=True)
 
 
 async def health_check(request):
