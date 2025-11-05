@@ -22,9 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot credentials and config
-API_ID = int(os.getenv('API_ID', '28318819'))
-API_HASH = os.getenv('API_HASH', '2996bb8e28a5bb09b56c16f6ca764c10')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8476862156:AAEMRJaLJ9PiN-8thOBr3hqGK2-PjzmWG_c')
+API_ID = int(os.getenv('API_ID', ''))
+API_HASH = os.getenv('API_HASH', '')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -1146,28 +1146,50 @@ async def setup_webhook():
         return False
     
     try:
+        # Use raw API call to set webhook
+        import httpx
+        
+        telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
+        
         # Delete existing webhook
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("🗑️ Deleted old webhook")
-        
-        # Set new webhook
-        success = await app.bot.set_webhook(
-            url=WEBHOOK_URL,
-            drop_pending_updates=True
-        )
-        
-        if success:
-            logger.info(f"✅ Webhook set successfully: {WEBHOOK_URL}")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{telegram_api_url}/deleteWebhook",
+                json={"drop_pending_updates": True}
+            )
+            result = response.json()
+            if result.get('ok'):
+                logger.info("🗑️ Deleted old webhook")
             
-            # Verify webhook
-            webhook_info = await app.bot.get_webhook_info()
-            logger.info(f"📡 Webhook info: {webhook_info.url}")
-            logger.info(f"📊 Pending updates: {webhook_info.pending_update_count}")
+            # Set new webhook
+            response = await client.post(
+                f"{telegram_api_url}/setWebhook",
+                json={
+                    "url": WEBHOOK_URL,
+                    "drop_pending_updates": True,
+                    "allowed_updates": ["message", "callback_query"]
+                }
+            )
+            result = response.json()
             
-            return True
-        else:
-            logger.error("❌ Failed to set webhook")
-            return False
+            if result.get('ok'):
+                logger.info(f"✅ Webhook set successfully: {WEBHOOK_URL}")
+                
+                # Verify webhook
+                response = await client.get(f"{telegram_api_url}/getWebhookInfo")
+                webhook_info = response.json()
+                
+                if webhook_info.get('ok'):
+                    info = webhook_info['result']
+                    logger.info(f"📡 Webhook URL: {info.get('url', 'N/A')}")
+                    logger.info(f"📊 Pending updates: {info.get('pending_update_count', 0)}")
+                    if info.get('last_error_message'):
+                        logger.warning(f"⚠️ Last error: {info.get('last_error_message')}")
+                
+                return True
+            else:
+                logger.error(f"❌ Failed to set webhook: {result.get('description', 'Unknown error')}")
+                return False
             
     except Exception as e:
         logger.error(f"❌ Webhook setup error: {e}")
@@ -1250,11 +1272,17 @@ async def main():
         logger.info("🛑 Shutting down...")
         try:
             if WEBHOOK_URL:
-                await app.bot.delete_webhook()
+                # Delete webhook on shutdown
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                        json={"drop_pending_updates": False}
+                    )
                 logger.info("🗑️ Webhook deleted")
             await app.stop()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
         if db_pool:
             try:
                 await db_pool.close()
