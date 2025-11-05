@@ -1129,17 +1129,22 @@ async def telegram_webhook(request):
 
 
 # --------------------------
-# PROCESS UPDATE: delegate to Pyrogram (keeps all your handlers intact)
+# PROCESS UPDATE: delegate safely via Pyrogram dispatcher (v2.x compatible)
 # --------------------------
+from pyrogram.raw.types import Update
+
 async def process_update_manually(update_dict):
-    """Process incoming Telegram updates via Pyrogram's process_update.
-       This keeps all handlers/filters exact as registered in the app."""
+    """Safely process an incoming Telegram update dict."""
     try:
-        # Use Pyrogram's own update processing - it will parse the raw webhook JSON
-        await app.process_update(update_dict)
-        logger.info("✅ Update processed via app.process_update()")
+        # Convert the raw Telegram update dict into Pyrogram's internal Update object
+        update = Update._parse(app, update_dict, {})
+
+        # Dispatch the parsed update to all registered handlers
+        await app.dispatch(update)
+
+        logger.info("✅ Update processed successfully via dispatcher")
     except Exception as e:
-        logger.error(f"❌ Error processing update via app.process_update(): {e}", exc_info=True)
+        logger.error(f"❌ Failed to process update: {e}", exc_info=True)
 
 
 async def health_check(request):
@@ -1310,3 +1315,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
