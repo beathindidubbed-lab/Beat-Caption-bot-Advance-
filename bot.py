@@ -49,7 +49,7 @@ logger.info(f"🔧 Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not configured
 
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
-DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
+DEFAULT_CAPTION = ("<b>My Anime</b> - <i>@Your_Channel</i>\n"
                   "Season {season} - Episode {episode} ({total_episode}) - {quality}\n"
                   "<blockquote>Don't miss this episode!</blockquote>")
 
@@ -455,11 +455,13 @@ async def start(client, message):
             if user_id in waiting_for_input:
                 del waiting_for_input[user_id]
                 
+            caption_text = welcome_data['caption'].format(first_name=first_name, user_id=user_id)
+            
             if welcome_data['message_type'] == 'photo':
                 sent = await client.send_photo(
                     message.chat.id,
                     photo=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption=caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
@@ -467,7 +469,7 @@ async def start(client, message):
                 sent = await client.send_video(
                     message.chat.id,
                     video=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption=caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
@@ -475,14 +477,14 @@ async def start(client, message):
                 sent = await client.send_animation(
                     message.chat.id,
                     animation=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption=caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
             else:
                 sent = await client.send_message(
                     message.chat.id,
-                    welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
@@ -852,6 +854,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         else:
             sent = await callback_query.message.reply(
                 "📝 No custom welcome message set.",
+                parse_mode=ParseMode.HTML,
                 reply_markup=get_admin_menu_markup()
             )
             last_bot_messages[chat_id] = sent.id
@@ -886,7 +889,8 @@ async def handle_forwarded(client, message: Message):
             
             # Check if bot is an admin
             try:
-                member = await client.get_chat_member(chat.id, (await client.get_me()).id)
+                me = await client.get_me()
+                member = await client.get_chat_member(chat.id, me.id)
                 if member.status not in [types.ChatMemberStatus.ADMINISTRATOR, types.ChatMemberStatus.OWNER]:
                      sent = await client.send_message(
                         message.chat.id,
@@ -897,7 +901,6 @@ async def handle_forwarded(client, message: Message):
                      return
             except Exception as e:
                 logger.warning(f"Failed to check bot admin status in {chat.id}: {e}")
-                # Don't stop process, rely on send_video failure later if really not admin
             
             settings = await get_user_settings(user_id)
             settings["target_chat_id"] = chat.id
@@ -934,12 +937,7 @@ async def handle_media_for_welcome(client, message: Message):
     if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
         return
     
-    try:
-        # Do not delete message immediately, as it may contain the media file that Pyrogram needs to process
-        # await message.delete() 
-        pass
-    except:
-        pass
+    # Do not delete message immediately, as it may contain the media file that Pyrogram needs to process
     
     await delete_last_message(client, message.chat.id)
     
@@ -971,11 +969,11 @@ async def handle_media_for_welcome(client, message: Message):
             )
             last_bot_messages[message.chat.id] = sent.id
         
-        # Now delete the user's media message after processing
-        try:
-            await message.delete()
-        except:
-            pass
+    # Now delete the user's media message after processing
+    try:
+        await message.delete()
+    except:
+        pass
 
 
 @app.on_message(filters.private & filters.text & ~filters.forwarded)
@@ -1051,7 +1049,8 @@ async def receive_input(client, message):
             
             # Check if bot is an admin
             try:
-                member = await client.get_chat_member(chat.id, (await client.get_me()).id)
+                me = await client.get_me()
+                member = await client.get_chat_member(chat.id, me.id)
                 if member.status not in [types.ChatMemberStatus.ADMINISTRATOR, types.ChatMemberStatus.OWNER]:
                      sent = await client.send_message(
                         chat_id,
@@ -1135,7 +1134,8 @@ async def auto_forward(client, message):
         try:
             # Check bot admin status just before sending
             try:
-                member = await client.get_chat_member(settings["target_chat_id"], (await client.get_me()).id)
+                me = await client.get_me()
+                member = await client.get_chat_member(settings["target_chat_id"], me.id)
                 if member.status not in [types.ChatMemberStatus.ADMINISTRATOR, types.ChatMemberStatus.OWNER]:
                      await message.reply(
                         f"❌ <b>Error forwarding!</b>\n\n"
@@ -1214,16 +1214,14 @@ async def telegram_webhook(request):
         
         logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        # --- FIX: Pass raw dictionary directly to Pyrogram client for processing ---
-        # This resolves the 'dict' object has no attribute 'from_id' error
-        asyncio.create_task(app(update_dict))
+        # --- FIX: Use app.feed_update() to pass raw update to Pyrogram dispatcher ---
+        asyncio.create_task(app.feed_update(update_dict))
         
         return web.Response(status=200, text="OK")
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return web.Response(status=200, text="OK")
 
-# Removed process_update_manually function as it's no longer needed (and was the source of errors)
 
 async def health_check(request):
     total_users = await get_all_users_count()
@@ -1305,6 +1303,7 @@ async def self_ping():
             try:
                 # Use aiohttp session for external ping
                 async with aiohttp.ClientSession() as session:
+                    # Ping the /health endpoint
                     async with session.get(f"{RENDER_EXTERNAL_URL}/health") as resp:
                         logger.info(f"✅ Self-ping: {resp.status}")
             except Exception as e:
