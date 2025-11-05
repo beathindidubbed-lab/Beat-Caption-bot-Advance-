@@ -759,59 +759,59 @@ async def telegram_webhook(request):
 
 async def process_update_manually(update_dict):
     """
-    - For 'message' updates: await types.Message._parse(...) to get a Message object,
-      then iterate registered MessageHandlers and run matching ones.
-    - For 'callback_query' updates: await types.CallbackQuery._parse(...) and dispatch similarly.
-    This avoids importing removed internals and works with Pyrogram v2.
+    Handles Telegram webhook updates manually by converting JSON into Message or CallbackQuery objects.
+    Fix: normalize dict fields before passing to _parse().
     """
     try:
         from pyrogram.handlers import MessageHandler, CallbackQueryHandler
         from pyrogram import types as py_types
 
-        # MESSAGE
         if 'message' in update_dict:
             msg_data = update_dict['message']
             logger.info(f"📝 Message data keys: {list(msg_data.keys())}")
             logger.info(f"📝 Message text: {msg_data.get('text', 'N/A')}")
-            try:
-                # MUST await _parse in v2
-                message_obj = await py_types.Message._parse(app, msg_data, {}, None)
-                logger.info(f"✅ Message parsed: id={getattr(message_obj, 'message_id', getattr(message_obj, 'id', 'N/A'))}, from={message_obj.from_user.id if message_obj.from_user else 'N/A'}")
 
-                # Iterate handlers registered in app.dispatcher.groups (preserves filters & groups)
-                handler_count = 0
+            # --- FIX: normalize structure for _parse() ---
+            if "from" in msg_data and "from_user" not in msg_data:
+                msg_data["from_user"] = msg_data.pop("from")
+            if "chat" in msg_data and isinstance(msg_data["chat"], dict):
+                msg_data["chat"] = {
+                    "id": msg_data["chat"].get("id"),
+                    "type": msg_data["chat"].get("type", "private"),
+                    "title": msg_data["chat"].get("title"),
+                    "username": msg_data["chat"].get("username"),
+                    "first_name": msg_data["chat"].get("first_name"),
+                    "last_name": msg_data["chat"].get("last_name"),
+                }
+
+            try:
+                message_obj = await py_types.Message._parse(app, msg_data, {}, None)
+                logger.info(f"✅ Parsed Message from {getattr(message_obj.from_user, 'id', 'N/A')}")
+
                 for group in sorted(app.dispatcher.groups.keys()):
-                    handlers = app.dispatcher.groups[group]
-                    logger.debug(f"Checking group {group} handlers: {len(handlers)}")
-                    for handler in handlers:
+                    for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, MessageHandler):
-                            handler_count += 1
                             try:
                                 if handler.filters is None or await handler.filters(app, message_obj):
-                                    logger.info(f"✅ Executing handler: {getattr(handler.callback, '__name__', str(handler))}")
                                     await handler.callback(app, message_obj)
-                                    # stop after first matching handler for this message (mimic default behaviour)
                                     return
                             except Exception:
                                 logger.exception("Handler execution error")
-                logger.info(f"📊 Total message handlers checked: {handler_count}")
             except Exception:
                 logger.exception("Error parsing Message object from webhook JSON")
 
-        # CALLBACK QUERY
         elif 'callback_query' in update_dict:
             cb_data = update_dict['callback_query']
             logger.info(f"🖲 Callback data: {cb_data.get('data', 'N/A')}")
             try:
+                if "from" in cb_data and "from_user" not in cb_data:
+                    cb_data["from_user"] = cb_data.pop("from")
                 callback_obj = await py_types.CallbackQuery._parse(app, cb_data, {})
-                logger.info(f"✅ Callback parsed: data={callback_obj.data}")
                 for group in sorted(app.dispatcher.groups.keys()):
-                    handlers = app.dispatcher.groups[group]
-                    for handler in handlers:
+                    for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, CallbackQueryHandler):
                             try:
                                 if handler.filters is None or await handler.filters(app, callback_obj):
-                                    logger.info("✅ Executing callback handler")
                                     await handler.callback(app, callback_obj)
                                     return
                             except Exception:
@@ -820,9 +820,10 @@ async def process_update_manually(update_dict):
                 logger.exception("Error parsing CallbackQuery from webhook JSON")
 
         else:
-            logger.info("⚙️ Unknown update type received")
+            logger.info("⚙️ Unknown update type")
     except Exception:
         logger.exception("process_update_manually() failed")
+
 
 # -------------------------
 # Health & stats endpoints
@@ -934,3 +935,4 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 # ---------- end of file ----------
+
