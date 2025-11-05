@@ -1,1306 +1,1448 @@
+import os
+import logging
+import psycopg2
+import secrets
+import requests
+import time
+import asyncio
 import sys
 import json
-from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
-from pathlib import Path
-import asyncio
-import os
-from aiohttp import web
-import aiohttp
-import psycopg
-from psycopg_pool import AsyncConnectionPool
-from datetime import datetime
-import logging
+from datetime import datetime, timedelta
+from functools import wraps
+from threading import Thread
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-# Set up logging
+# Configure logging
 logging.basicConfig(
-    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot credentials and config
-API_ID = int(os.getenv('API_ID', ''))
-API_HASH = os.getenv('API_HASH', '')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
-PORT = int(os.getenv('PORT', '10000'))
-RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
-DATABASE_URL = os.getenv('DATABASE_URL', '')
+# Bot configuration
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TOKEN_HERE")
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL connection string
+ADMIN_ID = 829342319  # <--- REPLACE with your actual Admin ID
+LINK_EXPIRY_MINUTES = 5
 
-# Webhook configuration
-WEBHOOK_HOST = RENDER_EXTERNAL_URL.replace('https://', '').replace('http://', '') if RENDER_EXTERNAL_URL else ''
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else ''
+# --- NEW BROADCAST THROTTLING CONSTANTS ---
+BROADCAST_CHUNK_SIZE = 1000
+BROADCAST_MIN_USERS = 5000
+BROADCAST_INTERVAL_MIN = 20
+# ------------------------------------------
 
-# Admin IDs - Add your Telegram user IDs here
-ADMIN_IDS = [
-    int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()
-]
+# Webhook / polling config
+PORT = int(os.environ.get('PORT', 8080))
+WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/') + '/'
 
-# If no admin IDs in environment variable, add them manually here
-if not ADMIN_IDS:
-    ADMIN_IDS = [123456789]  # Replace with your actual Telegram user ID
+# Customization constants
+WELCOME_SOURCE_CHANNEL = -1002530952988
+WELCOME_SOURCE_MESSAGE_ID = 32
+PUBLIC_ANIME_CHANNEL_URL = "https://t.me/BeatAnime"
+REQUEST_CHANNEL_URL = "https://t.me/Beat_Hindi_Dubbed"
+ADMIN_CONTACT_USERNAME = "Beat_Anime_Ocean"
 
-logger.info(f"🔧 Admin IDs configured: {ADMIN_IDS}")
-logger.info(f"🔧 Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not configured (using polling)'}")
+# User states
+ADD_CHANNEL_USERNAME, ADD_CHANNEL_TITLE, GENERATE_LINK_CHANNEL_USERNAME, PENDING_BROADCAST = range(4)
+user_states = {}
 
-# Default settings
-ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
-DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
-                  "Season {season} - Episode {episode} ({total_episode}) - {quality}\n"
-                  "<blockquote>Don't miss this episode!</blockquote>")
+# ========== HELPER FUNCTION: AUTO-DELETE ==========
 
-# Database pool
-db_pool = None
-
-# Pyrogram app
-app = Client(
-    "auto_caption_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=4,
-    in_memory=True
-)
-
-logger.info(f"🔧 Pyrogram Client initialized")
-
-# Track users waiting for input and last messages
-waiting_for_input = {}
-last_bot_messages = {}
-user_locks = {}
-
-# Web server
-web_app = web.Application()
-
-
-def get_user_lock(user_id):
-    """Get or create a lock for a specific user"""
-    if user_id not in user_locks:
-        user_locks[user_id] = asyncio.Lock()
-    return user_locks[user_id]
-
-
-async def init_db():
-    """Initialize PostgreSQL database"""
-    global db_pool
-    if DATABASE_URL:
-        try:
-            db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=False)
-            await db_pool.open()
-            
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('''
-                        CREATE TABLE IF NOT EXISTS user_settings (
-                            user_id BIGINT PRIMARY KEY,
-                            username TEXT,
-                            first_name TEXT,
-                            season INTEGER NOT NULL DEFAULT 1,
-                            episode INTEGER NOT NULL DEFAULT 1,
-                            total_episode INTEGER NOT NULL DEFAULT 1,
-                            video_count INTEGER NOT NULL DEFAULT 0,
-                            selected_qualities TEXT NOT NULL DEFAULT '480p,720p,1080p',
-                            base_caption TEXT NOT NULL,
-                            target_chat_id BIGINT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    ''')
-                    
-                    await cur.execute('''
-                        CREATE TABLE IF NOT EXISTS welcome_settings (
-                            id SERIAL PRIMARY KEY,
-                            message_type TEXT NOT NULL,
-                            file_id TEXT,
-                            caption TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    ''')
-                    
-                    await cur.execute('''
-                        CREATE TABLE IF NOT EXISTS upload_history (
-                            id SERIAL PRIMARY KEY,
-                            user_id BIGINT NOT NULL,
-                            season INTEGER NOT NULL,
-                            episode INTEGER NOT NULL,
-                            total_episode INTEGER NOT NULL,
-                            quality TEXT NOT NULL,
-                            file_id TEXT NOT NULL,
-                            caption TEXT,
-                            target_chat_id BIGINT,
-                            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    ''')
-                    
-                    await cur.execute('''
-                        CREATE TABLE IF NOT EXISTS channel_info (
-                            user_id BIGINT NOT NULL,
-                            chat_id BIGINT NOT NULL,
-                            username TEXT,
-                            title TEXT,
-                            type TEXT,
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            PRIMARY KEY (user_id, chat_id)
-                        )
-                    ''')
-                    
-                    await cur.execute('''
-                        CREATE INDEX IF NOT EXISTS idx_upload_history_user_id 
-                        ON upload_history(user_id)
-                    ''')
-                    
-                    await cur.execute('''
-                        CREATE INDEX IF NOT EXISTS idx_upload_history_uploaded_at 
-                        ON upload_history(uploaded_at)
-                    ''')
-                
-                await conn.commit()
-            
-            logger.info("✅ PostgreSQL database initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Database initialization failed: {e}")
-            logger.info("⚠️ Falling back to JSON file storage")
-            db_pool = None
-    else:
-        logger.info("⚠️ No DATABASE_URL found, using JSON file storage")
-
-
-async def get_user_settings(user_id, username=None, first_name=None):
-    """Load settings for a specific user"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('SELECT * FROM user_settings WHERE user_id = %s', (user_id,))
-                    row = await cur.fetchone()
-                    
-                    if row:
-                        colnames = [desc[0] for desc in cur.description]
-                        row_dict = dict(zip(colnames, row))
-                        return {
-                            'user_id': row_dict['user_id'],
-                            'season': row_dict['season'],
-                            'episode': row_dict['episode'],
-                            'total_episode': row_dict['total_episode'],
-                            'video_count': row_dict['video_count'],
-                            'selected_qualities': row_dict['selected_qualities'].split(',') if row_dict['selected_qualities'] else [],
-                            'base_caption': row_dict['base_caption'],
-                            'target_chat_id': row_dict['target_chat_id']
-                        }
-                    else:
-                        default_settings = {
-                            'user_id': user_id,
-                            'season': 1,
-                            'episode': 1,
-                            'total_episode': 1,
-                            'video_count': 0,
-                            'selected_qualities': ["480p", "720p", "1080p"],
-                            'base_caption': DEFAULT_CAPTION,
-                            'target_chat_id': None
-                        }
-                        
-                        await cur.execute('''
-                            INSERT INTO user_settings 
-                            (user_id, username, first_name, season, episode, total_episode, 
-                             video_count, selected_qualities, base_caption, target_chat_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ''', (user_id, username, first_name, 1, 1, 1, 0, 
-                            '480p,720p,1080p', DEFAULT_CAPTION, None))
-                        
-                        await conn.commit()
-                        return default_settings
-        except Exception as e:
-            logger.error(f"Error loading user settings: {e}")
+async def delete_update_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Safely attempts to delete the message associated with the incoming update (user input)."""
+    user_id = update.effective_user.id
     
-    # Fallback to JSON
-    user_file = Path(f"user_{user_id}_progress.json")
-    if user_file.exists():
-        with open(user_file, "r") as f:
-            return json.load(f)
+    if user_id == ADMIN_ID and user_states.get(user_id) == PENDING_BROADCAST:
+        return 
+        
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete message for user {update.effective_user.id}: {e}")
+
+async def delete_bot_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id):
+    """Safely attempts to delete the bot's stored prompt message."""
+    prompt_id = context.user_data.pop('bot_prompt_message_id', None)
+    if prompt_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=prompt_id)
+        except Exception as e:
+            logger.warning(f"Could not delete bot prompt message {prompt_id}: {e}")
+    return prompt_id
+
+# ========== DATABASE FUNCTIONS (PostgreSQL) ==========
+
+def get_db_connection():
+    """Get PostgreSQL connection"""
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_banned BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS force_sub_channels (
+            channel_id SERIAL PRIMARY KEY,
+            channel_username TEXT UNIQUE,
+            channel_title TEXT,
+            added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS generated_links (
+            link_id TEXT PRIMARY KEY,
+            channel_username TEXT,
+            user_id BIGINT,
+            created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            never_expires BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_user_id_by_username(username):
+    """Looks up a user's ID by their @username (case-insensitive)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    clean_username = username.lstrip('@').lower() 
+    cursor.execute('SELECT user_id FROM users WHERE LOWER(username) = %s', (clean_username,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
     
-    return {
-        'user_id': user_id,
-        'season': 1,
-        'episode': 1,
-        'total_episode': 1,
-        'video_count': 0,
-        'selected_qualities': ["480p", "720p", "1080p"],
-        'base_caption': DEFAULT_CAPTION,
-        'target_chat_id': None
-    }
+def resolve_target_user_id(arg):
+    """Tries to resolve an argument (ID or @username) into a numerical user ID."""
+    try:
+        return int(arg)
+    except ValueError:
+        pass
 
-
-async def save_user_settings(settings):
-    """Save user settings"""
-    user_id = settings['user_id']
+    if arg:
+        return get_user_id_by_username(arg)
     
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('''
-                        UPDATE user_settings SET 
-                            season = %s, episode = %s, total_episode = %s, 
-                            video_count = %s, selected_qualities = %s, 
-                            base_caption = %s, target_chat_id = %s, 
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE user_id = %s
-                    ''', (settings['season'], settings['episode'], 
-                        settings['total_episode'], settings['video_count'], 
-                        ','.join(settings['selected_qualities']),
-                        settings['base_caption'], settings['target_chat_id'], user_id))
-                await conn.commit()
-            return
-        except Exception as e:
-            logger.error(f"Error saving user settings: {e}")
-    
-    # Fallback to JSON
-    user_file = Path(f"user_{user_id}_progress.json")
-    user_file.write_text(json.dumps(settings, indent=2))
-
-
-async def log_upload(user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id):
-    """Log upload to database"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('''
-                        INSERT INTO upload_history 
-                        (user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ''', (user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id))
-                await conn.commit()
-        except Exception as e:
-            logger.error(f"Error logging upload: {e}")
-
-
-async def save_channel_info(user_id, chat_id, username, title, chat_type):
-    """Save channel info"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('''
-                        INSERT INTO channel_info (user_id, chat_id, username, title, type)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (user_id, chat_id) DO UPDATE SET
-                            username = EXCLUDED.username,
-                            title = EXCLUDED.title,
-                            type = EXCLUDED.type,
-                            added_at = CURRENT_TIMESTAMP
-                    ''', (user_id, chat_id, username, title, chat_type))
-                await conn.commit()
-        except Exception as e:
-            logger.error(f"Error saving channel info: {e}")
-
-
-async def get_user_upload_stats(user_id):
-    """Get upload statistics"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('SELECT COUNT(*) FROM upload_history WHERE user_id = %s', (user_id,))
-                    total = await cur.fetchone()
-                    total = total[0] if total else 0
-                    
-                    await cur.execute(
-                        'SELECT COUNT(*) FROM upload_history WHERE user_id = %s AND DATE(uploaded_at) = CURRENT_DATE',
-                        (user_id,)
-                    )
-                    today = await cur.fetchone()
-                    today = today[0] if today else 0
-                    
-                    return total, today
-        except Exception as e:
-            logger.error(f"Error getting stats: {e}")
-    return 0, 0
-
-
-async def get_all_users_count():
-    """Get total users"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('SELECT COUNT(*) FROM user_settings')
-                    count = await cur.fetchone()
-                    return count[0] if count else 0
-        except Exception as e:
-            logger.error(f"Error getting user count: {e}")
-            return 0
-    return 0
-
-
-async def get_welcome_message():
-    """Get welcome message"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('SELECT * FROM welcome_settings ORDER BY id DESC LIMIT 1')
-                    row = await cur.fetchone()
-                    if row:
-                        colnames = [desc[0] for desc in cur.description]
-                        row_dict = dict(zip(colnames, row))
-                        return {
-                            'message_type': row_dict['message_type'],
-                            'file_id': row_dict['file_id'],
-                            'caption': row_dict['caption']
-                        }
-        except Exception as e:
-            logger.error(f"Error getting welcome message: {e}")
     return None
 
+def ban_user(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET is_banned = TRUE WHERE user_id = %s', (user_id,))
+    conn.commit()
+    conn.close()
 
-async def save_welcome_message(message_type, file_id, caption):
-    """Save welcome message"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute('DELETE FROM welcome_settings')
-                    await cur.execute('''
-                        INSERT INTO welcome_settings (message_type, file_id, caption)
-                        VALUES (%s, %s, %s)
-                    ''', (message_type, file_id, caption))
-                await conn.commit()
-                return True
-        except Exception as e:
-            logger.error(f"Error saving welcome message: {e}")
-    return False
+def unban_user(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET is_banned = FALSE WHERE user_id = %s', (user_id,))
+    conn.commit()
+    conn.close()
 
+def is_user_banned(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT is_banned FROM users WHERE user_id = %s', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else False
 
-async def delete_last_message(client, chat_id):
-    """Delete the last bot message"""
-    if chat_id in last_bot_messages:
-        try:
-            await client.delete_messages(chat_id, last_bot_messages[chat_id])
-        except Exception:
-            pass
-        del last_bot_messages[chat_id]
+def add_user(user_id, username, first_name, last_name):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    clean_username = username.lstrip('@') if username else None
+    cursor.execute('''
+        INSERT INTO users (user_id, username, first_name, last_name)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (user_id) 
+        DO UPDATE SET username = EXCLUDED.username, 
+                      first_name = EXCLUDED.first_name, 
+                      last_name = EXCLUDED.last_name
+    ''', (user_id, clean_username, first_name, last_name))
+    conn.commit()
+    conn.close()
 
+def get_user_count():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM users')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
-def get_menu_markup():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Preview Caption", callback_data="preview")],
-        [InlineKeyboardButton("✏️ Set Caption", callback_data="set_caption")],
-        [
-            InlineKeyboardButton("📺 Set Season", callback_data="set_season"),
-            InlineKeyboardButton("🎬 Set Episode", callback_data="set_episode")
-        ],
-        [InlineKeyboardButton("🔢 Set Total Episode", callback_data="set_total_episode")],
-        [InlineKeyboardButton("🎥 Quality Settings", callback_data="quality_menu")],
-        [InlineKeyboardButton("🎯 Set Target Channel", callback_data="set_channel")],
-        [InlineKeyboardButton("📊 My Statistics", callback_data="stats")],
-        [InlineKeyboardButton("🔄 Reset Episode", callback_data="reset")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-    ])
+def get_all_users(limit=None, offset=0):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if limit is None:
+        cursor.execute('SELECT user_id, username, first_name, last_name, joined_date, is_banned FROM users ORDER BY joined_date DESC')
+    else:
+        cursor.execute('SELECT user_id, username, first_name, last_name, joined_date, is_banned FROM users ORDER BY joined_date DESC LIMIT %s OFFSET %s', (limit, offset))
+    users = cursor.fetchall()
+    conn.close()
+    return users
 
+def get_user_info_by_id(user_id):
+    """Fetches a single user's details by ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id, username, first_name, last_name, joined_date, is_banned FROM users WHERE user_id = %s', (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
 
-def get_admin_menu_markup():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Set Welcome Message", callback_data="admin_set_welcome")],
-        [InlineKeyboardButton("👁️ Preview Welcome", callback_data="admin_preview_welcome")],
-        [InlineKeyboardButton("📊 Global Stats", callback_data="admin_global_stats")],
-        [InlineKeyboardButton("⬅️ Back to User Menu", callback_data="back_to_main")]
-    ])
-
-
-def get_quality_markup(selected_qualities):
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(
-            f"{'✅ ' if q in selected_qualities else ''}{q}",
-            callback_data=f"toggle_quality_{q}"
-        )] for q in ALL_QUALITIES] +
-        [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main")]]
-    )
-
-
-def get_channel_set_markup():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Forward Message", callback_data="forward_channel")],
-        [InlineKeyboardButton("🔗 Send Username/ID", callback_data="send_channel_id")],
-        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main")]
-    ])
-
-
-@app.on_message(filters.private & filters.command("start"))
-async def start(client, message):
-    logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
-    
-    user_id = message.from_user.id
-    username = message.from_user.username
-    first_name = message.from_user.first_name
-    
+def add_force_sub_channel(channel_username, channel_title):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        settings = await get_user_settings(user_id, username, first_name)
-        await message.delete()
+        cursor.execute('UPDATE force_sub_channels SET is_active = TRUE, channel_title = %s WHERE channel_username = %s', (channel_title, channel_username))
+        if cursor.rowcount == 0:
+            cursor.execute('''
+                INSERT INTO force_sub_channels (channel_username, channel_title, is_active)
+                VALUES (%s, %s, TRUE)
+            ''', (channel_username, channel_title))
+        conn.commit()
+        return True
     except Exception as e:
-        logger.error(f"Error in start: {e}")
+        logger.error(f"DB Error adding channel: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_all_force_sub_channels(return_usernames_only=False):
+    """
+    Fetches all active force sub channels.
+    If return_usernames_only is True, returns a list of usernames.
+    Otherwise, returns a list of tuples: [(username, title), ...]
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if return_usernames_only:
+        cursor.execute('SELECT channel_username FROM force_sub_channels WHERE is_active = TRUE ORDER BY channel_title')
+        channels = [row[0] for row in cursor.fetchall()]
+    else:
+        cursor.execute('SELECT channel_username, channel_title FROM force_sub_channels WHERE is_active = TRUE ORDER BY channel_title')
+        channels = cursor.fetchall()
+    conn.close()
+    return channels
+
+def get_force_sub_channel_info(channel_username):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT channel_username, channel_title FROM force_sub_channels WHERE channel_username = %s AND is_active = TRUE', (channel_username,))
+    channel = cursor.fetchone()
+    conn.close()
+    return channel
+
+def delete_force_sub_channel(channel_username):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE force_sub_channels SET is_active = FALSE WHERE channel_username = %s', (channel_username,))
+    conn.commit()
+    conn.close()
+
+def generate_link_id(channel_username, user_id, never_expires=False):
+    """Generate a link that optionally never expires"""
+    link_id = secrets.token_urlsafe(16)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO generated_links (link_id, channel_username, user_id, never_expires)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (link_id) DO UPDATE SET channel_username = EXCLUDED.channel_username
+    ''', (link_id, channel_username, user_id, never_expires))
+    conn.commit()
+    conn.close()
+    return link_id
+
+def get_link_info(link_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT channel_username, user_id, created_time, never_expires
+        FROM generated_links WHERE link_id = %s
+    ''', (link_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
     
-    await delete_last_message(client, message.chat.id)
-    
-    welcome_data = await get_welcome_message()
-    
-    if welcome_data and welcome_data['file_id']:
+# ========== FORCE SUBSCRIPTION LOGIC ==========
+
+async def is_user_subscribed(user_id: int, bot) -> bool:
+    """Check if user is member of all force-sub channels."""
+    force_sub_channels = get_all_force_sub_channels(return_usernames_only=True)
+    if not force_sub_channels:
+        return True
+
+    for ch in force_sub_channels:
         try:
-            if welcome_data['message_type'] == 'photo':
-                sent = await client.send_photo(
-                    message.chat.id,
-                    photo=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_menu_markup()
-                )
-            elif welcome_data['message_type'] == 'video':
-                sent = await client.send_video(
-                    message.chat.id,
-                    video=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_menu_markup()
-                )
-            elif welcome_data['message_type'] == 'animation':
-                sent = await client.send_animation(
-                    message.chat.id,
-                    animation=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_menu_markup()
-                )
-            else:
-                sent = await client.send_message(
-                    message.chat.id,
-                    welcome_data['caption'].format(first_name=first_name, user_id=user_id),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_menu_markup()
-                )
-            last_bot_messages[message.chat.id] = sent.id
-            return
+            member = await bot.get_chat_member(chat_id=ch, user_id=user_id)
+            if member.status in ['left', 'kicked']:
+                return False
         except Exception as e:
-            logger.error(f"Error sending custom welcome: {e}")
-    
-    welcome_text = (
-        f"👋 <b>Welcome {first_name}!</b>\n\n"
-        "🤖 <b>Your Personal Anime Caption Bot</b>\n\n"
-        "✨ <b>Features:</b>\n"
-        "• Auto-caption and forward videos\n"
-        "• Multi-quality support\n"
-        "• Episode tracking (personal)\n"
-        "• Your own channel settings\n"
-        "• Upload statistics\n\n"
-        "🎯 <b>Get Started:</b>\n"
-        "1. Set your target channel\n"
-        "2. Configure caption template\n"
-        "3. Select video qualities\n"
-        "4. Send videos to forward!\n\n"
-        "💡 Type /help to see all commands"
-    )
-    
-    sent = await client.send_message(
-        message.chat.id,
-        welcome_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_menu_markup()
-    )
-    last_bot_messages[message.chat.id] = sent.id
+            logger.error(f"Error checking membership in {ch} for user {user_id}: {e}")
+            return False 
+    return True
 
+def force_sub_required(func):
+    """Decorator for handlers to enforce force-subscribe, but bypass for admin."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user = update.effective_user
+        if user is None:
+            return await func(update, context, *args, **kwargs)
+        
+        force_sub_channels_info = get_all_force_sub_channels(return_usernames_only=False)
+        
+        if user.id == ADMIN_ID:
+            return await func(update, context, *args, **kwargs)
 
-@app.on_message(filters.private & filters.command("help"))
-async def help_command(client, message):
+        if is_user_banned(user.id):
+            await delete_update_message(update, context)
+            ban_text = "🚫 You have been banned from using this bot. Contact the administrator for details."
+            if update.message:
+                await update.message.reply_text(ban_text)
+            elif update.callback_query:
+                try:
+                    await update.callback_query.edit_message_text(ban_text)
+                except:
+                    await context.bot.send_message(update.effective_chat.id, ban_text)
+            return
+
+        if not force_sub_channels_info:
+            return await func(update, context, *args, **kwargs)
+
+        subscribed = await is_user_subscribed(user.id, context.bot)
+        
+        if not subscribed:
+            await delete_update_message(update, context)
+            
+            keyboard = []
+            channels_text_list = []
+            
+            for uname, title in force_sub_channels_info:
+                keyboard.append([InlineKeyboardButton(f"{title}", url=f"https://t.me/{uname.lstrip('@')}")])
+                channels_text_list.append(f"• {title} (<code>{uname}</code>)")
+                
+            keyboard.append([InlineKeyboardButton("Click to continue", callback_data="verify_subscription")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            channels_text = "\n".join(channels_text_list)
+            text = (
+                "<b>Please join our world of anime:</b>\n\n"
+                "After joining, click <b>Verify Subscription</b>."
+            )
+
+            if update.message:
+                await update.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+            elif update.callback_query:
+                await update.callback_query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+            return
+        
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+# ========== ADMIN COMMAND HANDLERS ==========
+
+async def reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to restart the bot process gracefully."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await delete_update_message(update, context)
+    user_states.pop(update.effective_user.id, None)
+    await delete_bot_prompt(context, update.effective_chat.id)
+    
+    message_id_to_copy = None
+    if context.args:
+        try:
+            if context.args[0].lower() == 'admin':
+                message_id_to_copy = 'admin'
+            else:
+                message_id_to_copy = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text(
+                "❌ **Usage:** `/reload [optional message ID or 'admin']`\n**Example:** `/reload 1234` or `/reload admin`",
+                parse_mode='Markdown'
+            )
+            return
+
+    restart_info = {
+        'chat_id': update.effective_chat.id,
+        'admin_id': ADMIN_ID,
+        'message_id_to_copy': message_id_to_copy 
+    }
     try:
-        await message.delete()
-    except:
-        pass
+        with open('restart_message.json', 'w') as f:
+            json.dump(restart_info, f)
+    except Exception as e:
+        logger.error(f"Failed to write restart file: {e}")
+
+    await update.message.reply_text("🔄 **Bot is restarting...** Please wait.", parse_mode='Markdown')
     
-    help_text = (
-        "📚 <b>Bot Commands & Features</b>\n\n"
-        "🤖 <b>Basic Commands:</b>\n"
-        "/start - Initialize bot and show main menu\n"
-        "/help - Show this help message\n"
-        "/stats - View your upload statistics\n"
-        "/admin - Admin panel (admin only)\n\n"
-        "💡 <b>Tips:</b>\n"
-        "• Make bot admin in your channel first\n"
-        "• Use forward method to easily get channel ID\n"
-        "• Preview caption before uploading\n"
-        "• Each user has independent settings\n\n"
-        "❓ <b>Need Help?</b>\n"
-        "Contact the bot admin."
+    logger.info("Bot restart initiated by admin. Stopping application.")
+    sys.exit(0)
+
+async def ban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to ban a user by ID or username."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await delete_update_message(update, context)
+    
+    user_states.pop(update.effective_user.id, None)
+    await delete_bot_prompt(context, update.effective_chat.id)
+
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "❌ **Usage:** `/banuser @username or ID`\n**Example:** `/banuser 123456789`",
+            parse_mode='Markdown'
+        )
+        return
+
+    target_arg = args[0]
+    target_user_id = resolve_target_user_id(target_arg)
+
+    if target_user_id is None:
+        await update.message.reply_text(f"❌ User **{target_arg}** not found in database.", parse_mode='Markdown')
+        return
+        
+    if target_user_id == ADMIN_ID:
+        await update.message.reply_text("⚠️ Cannot ban the **Admin**.", parse_mode='Markdown')
+        return
+
+    ban_user(target_user_id)
+    await update.message.reply_text(
+        f"🚫 User with ID **{target_user_id}** (Target: {target_arg}) has been **banned**.",
+        parse_mode='Markdown'
     )
-    
-    await message.reply(help_text, parse_mode=ParseMode.HTML)
 
+async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to unban a user by ID or username."""
+    if update.effective_user.id != ADMIN_ID:
+        return
 
-@app.on_message(filters.private & filters.command("stats"))
-async def stats_command(client, message):
+    await delete_update_message(update, context)
+
+    user_states.pop(update.effective_user.id, None)
+    await delete_bot_prompt(context, update.effective_chat.id)
+
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "❌ **Usage:** `/unbanuser @username or ID`\n**Example:** `/unbanuser @BannedUser`",
+            parse_mode='Markdown'
+        )
+        return
+
+    target_arg = args[0]
+    target_user_id = resolve_target_user_id(target_arg)
+
+    if target_user_id is None:
+        await update.message.reply_text(f"❌ User **{target_arg}** not found in database.", parse_mode='Markdown')
+        return
+        
+    unban_user(target_user_id)
+    await update.message.reply_text(
+        f"✅ User with ID **{target_user_id}** (Target: {target_arg}) has been **unbanned**.",
+        parse_mode='Markdown'
+    )
+
+async def add_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to add a force-sub channel via /addchannel @username title."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await delete_update_message(update, context)
+    await delete_bot_prompt(context, update.effective_chat.id)
+
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❌ **Usage:** `/addchannel @channelusername Channel Title`\n**Example:** `/addchannel @BeatAnime Beat Anime Channel`",
+            parse_mode='Markdown'
+        )
+        return
+
+    channel_username = args[0]
+    channel_title = " ".join(args[1:])
+
+    if not channel_username.startswith('@'):
+        await update.message.reply_text("❌ Channel username must start with **@**.", parse_mode='Markdown')
+        return
+        
     try:
-        await message.delete()
-    except:
-        pass
+        await context.bot.get_chat(channel_username)
+    except Exception as e:
+        logger.warning(f"Bot failed to get chat {channel_username}: {e}")
+        await update.message.reply_text(
+            f"⚠️ Bot cannot access channel **{channel_username}**. Make sure the bot is an **Admin** in that channel.",
+            parse_mode='Markdown'
+        )
+        return
+
+    if add_force_sub_channel(channel_username, channel_title):
+        await update.message.reply_text(
+            f"✅ Successfully added/updated channel:\n**Title:** {channel_title}\n**Username:** `{channel_username}`",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("❌ Failed to add channel. Check logs for database error.", parse_mode='Markdown')
+
+async def remove_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to remove a force-sub channel via /removechannel @username."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+        
+    await delete_update_message(update, context)
+    await delete_bot_prompt(context, update.effective_chat.id)
+
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "❌ **Usage:** `/removechannel @channelusername`\n**Example:** `/removechannel @OldChannel`",
+            parse_mode='Markdown'
+        )
+        return
+
+    channel_username = args[0]
+
+    if not channel_username.startswith('@'):
+        await update.message.reply_text("❌ Channel username must start with **@**.", parse_mode='Markdown')
+        return
+
+    channel_info = get_force_sub_channel_info(channel_username)
+    if not channel_info:
+        await update.message.reply_text(
+            f"⚠️ Channel **{channel_username}** is not active or does not exist in the list.",
+            parse_mode='Markdown'
+        )
+        return
+
+    delete_force_sub_channel(channel_username)
+    await update.message.reply_text(
+        f"🗑️ Successfully removed/deactivated channel **{channel_username}**.",
+        parse_mode='Markdown'
+    )
+
+@force_sub_required
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to show bot statistics."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+        
+    await delete_update_message(update, context)
     
-    user_id = message.from_user.id
-    settings = await get_user_settings(user_id)
-    total, today = await get_user_upload_stats(user_id)
-    
-    channel_status = "✅ Set" if settings['target_chat_id'] else "❌ Not Set"
+    user_states.pop(update.effective_user.id, None)
+    await delete_bot_prompt(context, update.effective_chat.id)
+
+    user_count = get_user_count()
+    channel_count = len(get_all_force_sub_channels()) 
     
     stats_text = (
-        f"📊 <b>Your Statistics</b>\n\n"
-        f"👤 User ID: <code>{user_id}</code>\n\n"
-        f"📤 <b>Uploads:</b>\n"
-        f"• Total: <code>{total}</code>\n"
-        f"• Today: <code>{today}</code>\n\n"
-        f"📺 <b>Current Progress:</b>\n"
-        f"• Season: <code>{settings['season']}</code>\n"
-        f"• Episode: <code>{settings['episode']}</code>\n"
-        f"• Total Episodes: <code>{settings['total_episode']}</code>\n\n"
-        f"🎯 <b>Channel:</b> {channel_status}\n"
-        f"🎥 <b>Qualities:</b> <code>{', '.join(settings['selected_qualities']) if settings['selected_qualities'] else 'None'}</code>"
-    )
-    await message.reply(stats_text, parse_mode=ParseMode.HTML)
-
-
-@app.on_message(filters.private & filters.command("admin"))
-async def admin_command(client, message):
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    user_id = message.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await message.reply(
-            "❌ <b>Access Denied!</b>\n\n"
-            "You don't have permission to use this command.",
-            parse_mode=ParseMode.HTML
-        )
-        return
-    
-    total_users = await get_all_users_count()
-    
-    admin_text = (
-        f"👑 <b>Admin Panel</b>\n\n"
-        f"📊 <b>Global Statistics:</b>\n"
-        f"• Total Users: <code>{total_users}</code>\n\n"
-        f"🤖 Bot Status: ✅ Running\n"
-        f"👤 Your Admin ID: <code>{user_id}</code>"
+        "📊 <b>BOT STATISTICS</b>\n\n"
+        f"👤 Total Users: {user_count}\n"
+        f"📢 Force Sub Channels: {channel_count}\n"
+        f"🔗 Link Expiry: {LINK_EXPIRY_MINUTES} minutes"
     )
     
-    await message.reply(admin_text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-
-
-@app.on_callback_query()
-async def handle_buttons(client, callback_query: CallbackQuery):
-    try:
-        await callback_query.answer()
-    except:
-        pass
-
-    user_id = callback_query.from_user.id
-    chat_id = callback_query.message.chat.id
-    data = callback_query.data
+    keyboard = [
+        [InlineKeyboardButton("🔙 BACK TO MENU", callback_data="admin_back")]
+    ]
     
-    settings = await get_user_settings(user_id)
-    await delete_last_message(client, chat_id)
+    await update.message.reply_text(
+        text=stats_text, 
+        parse_mode='HTML', 
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-    if data == "preview":
-        if not settings['target_chat_id']:
-            sent = await callback_query.message.reply(
-                "⚠️ <b>No target channel set!</b>\n\n"
-                "Please set your target channel first.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-            return
-            
-        quality = settings["selected_qualities"][settings["video_count"] % len(settings["selected_qualities"])] if settings["selected_qualities"] else "N/A"
-        preview_text = settings["base_caption"] \
-            .replace("{season}", f"{settings['season']:02}") \
-            .replace("{episode}", f"{settings['episode']:02}") \
-            .replace("{total_episode}", f"{settings['total_episode']:02}") \
-            .replace("{quality}", quality)
+# ========== BOT HANDLERS ==========
 
-        sent = await callback_query.message.reply(
-            f"📝 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
-            f"<b>Current Settings:</b>\n"
-            f"Season: {settings['season']}\n"
-            f"Episode: {settings['episode']}\n"
-            f"Total Episode: {settings['total_episode']}\n"
-            f"Channel ID: <code>{settings['target_chat_id']}</code>\n"
-            f"Qualities: {', '.join(settings['selected_qualities']) if settings['selected_qualities'] else 'None'}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
+@force_sub_required
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if update.message:
+        await delete_update_message(update, context)
 
-    elif data == "set_caption":
-        waiting_for_input[user_id] = "caption"
-        sent = await callback_query.message.reply(
-            "✏️ <b>Set Your Caption Template</b>\n\n"
-            "Send the new caption (HTML supported).\n\n"
-            "<b>Placeholders:</b>\n"
-            "{season}, {episode}, {total_episode}, {quality}",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "set_season":
-        waiting_for_input[user_id] = "season"
-        sent = await callback_query.message.reply(
-            f"📺 Current season: <b>{settings['season']}</b>\n\n"
-            "Send the new season number.",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "set_episode":
-        waiting_for_input[user_id] = "episode"
-        sent = await callback_query.message.reply(
-            f"🎬 Current episode: <b>{settings['episode']}</b>\n\n"
-            "Send the new episode number.",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "set_total_episode":
-        waiting_for_input[user_id] = "total_episode"
-        sent = await callback_query.message.reply(
-            f"🔢 Current total episode: <b>{settings['total_episode']}</b>\n\n"
-            "Send the new total episode number.",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "quality_menu":
-        sent = await callback_query.message.reply(
-            "🎥 <b>Quality Settings</b>\n\n"
-            "Select which qualities to upload.\n"
-            "Click to toggle on/off.\n\n"
-            f"<b>Selected:</b> {', '.join(settings['selected_qualities']) if settings['selected_qualities'] else 'None'}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_quality_markup(settings['selected_qualities'])
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data.startswith("toggle_quality_"):
-        quality = data.replace("toggle_quality_", "")
-        if quality in settings["selected_qualities"]:
-            settings["selected_qualities"].remove(quality)
-        else:
-            settings["selected_qualities"].append(quality)
-        
-        settings["selected_qualities"] = [q for q in ALL_QUALITIES if q in settings["selected_qualities"]]
-        await save_user_settings(settings)
-        
+    if update.callback_query and update.callback_query.message:
         try:
-            await callback_query.message.edit_text(
-                "🎥 <b>Quality Settings</b>\n\n"
-                "Select which qualities to upload.\n"
-                "Click to toggle on/off.\n\n"
-                f"<b>Selected:</b> {', '.join(settings['selected_qualities']) if settings['selected_qualities'] else 'None'}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_quality_markup(settings['selected_qualities'])
-            )
-        except:
-            pass
-
-    elif data == "set_channel":
-        sent = await callback_query.message.reply(
-            "🎯 <b>Set Your Target Channel</b>\n\n"
-            "Choose how to set it:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_channel_set_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "forward_channel":
-        waiting_for_input[user_id] = "forward_channel"
-        sent = await callback_query.message.reply(
-            "📤 <b>Forward a message from your channel</b>\n\n"
-            "Forward any message from your target channel.\n\n"
-            "⚠️ Make sure I'm an admin!",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "send_channel_id":
-        waiting_for_input[user_id] = "channel_id"
-        sent = await callback_query.message.reply(
-            "🔗 <b>Send Channel Username or ID</b>\n\n"
-            "Send the channel username (e.g., @mychannel) or ID (e.g., -1001234567890).\n\n"
-            "⚠️ Make sure I'm an admin!",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "stats":
-        total, today = await get_user_upload_stats(user_id)
-        channel_status = "✅ Set" if settings['target_chat_id'] else "❌ Not Set"
-        
-        sent = await callback_query.message.reply(
-            f"📊 <b>Your Statistics</b>\n\n"
-            f"👤 User ID: <code>{user_id}</code>\n\n"
-            f"📤 <b>Uploads:</b>\n"
-            f"• Total: <code>{total}</code>\n"
-            f"• Today: <code>{today}</code>\n\n"
-            f"📺 <b>Progress:</b>\n"
-            f"• Season: <code>{settings['season']}</code>\n"
-            f"• Episode: <code>{settings['episode']}</code>\n"
-            f"• Total Episodes: <code>{settings['total_episode']}</code>\n\n"
-            f"🎯 <b>Channel:</b> {channel_status}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "back_to_main":
-        try:
-            await callback_query.message.delete()
-        except:
-            pass
-        
-        sent = await client.send_message(
-            chat_id,
-            "👋 <b>Welcome Back!</b>\n\nUse the buttons below.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "reset":
-        settings["episode"] = 1
-        settings["video_count"] = 0
-        await save_user_settings(settings)
-        sent = await callback_query.message.reply(
-            f"🔄 <b>Episode counter reset!</b>\n\n"
-            f"Starting from Episode {settings['episode']} (Season {settings['season']}).",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "cancel":
-        if user_id in waiting_for_input:
-            del waiting_for_input[user_id]
-            sent = await callback_query.message.reply(
-                "❌ Process cancelled.",
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await callback_query.message.reply(
-                "No ongoing process to cancel.",
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-
-    elif data == "admin_set_welcome":
-        if user_id not in ADMIN_IDS:
-            await callback_query.answer("❌ Admin only!", show_alert=True)
-            return
-        
-        waiting_for_input[user_id] = "admin_welcome"
-        sent = await callback_query.message.reply(
-            "📝 <b>Set Welcome Message</b>\n\n"
-            "Send a photo/video/GIF with caption.\n\n"
-            "<b>Placeholders:</b>\n"
-            "{first_name}, {user_id}",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    elif data == "admin_preview_welcome":
-        welcome_data = await get_welcome_message()
-        if welcome_data and welcome_data['file_id']:
-            try:
-                preview_caption = f"👁️ <b>Welcome Preview:</b>\n\n{welcome_data['caption']}\n\n<b>Type:</b> {welcome_data['message_type']}"
-                
-                if welcome_data['message_type'] == 'photo':
-                    await client.send_photo(chat_id, photo=welcome_data['file_id'], caption=preview_caption, parse_mode=ParseMode.HTML)
-                elif welcome_data['message_type'] == 'video':
-                    await client.send_video(chat_id, video=welcome_data['file_id'], caption=preview_caption, parse_mode=ParseMode.HTML)
-                elif welcome_data['message_type'] == 'animation':
-                    await client.send_animation(chat_id, animation=welcome_data['file_id'], caption=preview_caption, parse_mode=ParseMode.HTML)
-            except Exception as e:
-                logger.error(f"Error preview: {e}")
-        else:
-            sent = await callback_query.message.reply(
-                "📝 No custom welcome message set.",
-                reply_markup=get_admin_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-
-    elif data == "admin_global_stats":
-        total_users = await get_all_users_count()
-        sent = await callback_query.message.reply(
-            f"📊 <b>Global Statistics</b>\n\n"
-            f"👥 Total Users: <code>{total_users}</code>\n"
-            f"🤖 Bot Status: ✅ Running\n"
-            f"🗄️ Database: {'✅ Connected' if db_pool else '⚠️ JSON'}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_admin_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-
-
-@app.on_message(filters.private & filters.forwarded)
-async def handle_forwarded(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id in waiting_for_input and waiting_for_input[user_id] == "forward_channel":
-        try:
-            await message.delete()
-        except:
-            pass
-        
-        await delete_last_message(client, message.chat.id)
-        
-        if message.forward_from_chat:
-            chat = message.forward_from_chat
-            settings = await get_user_settings(user_id)
-            settings["target_chat_id"] = chat.id
-            await save_user_settings(settings)
-            
-            await save_channel_info(user_id, chat.id, chat.username if chat.username else None, chat.title, str(chat.type))
-            
-            del waiting_for_input[user_id]
-            
-            sent = await client.send_message(
-                message.chat.id,
-                f"✅ <b>Channel updated!</b>\n\n"
-                f"📝 Title: <b>{chat.title}</b>\n"
-                f"🆔 ID: <code>{chat.id}</code>\n"
-                f"👤 Username: @{chat.username if chat.username else 'N/A'}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[message.chat.id] = sent.id
-        else:
-            sent = await client.send_message(
-                message.chat.id,
-                "❌ Please forward from a channel, not a user.",
-                parse_mode=ParseMode.HTML
-            )
-            last_bot_messages[message.chat.id] = sent.id
-
-
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-async def handle_media_for_welcome(client, message: Message):
-    user_id = message.from_user.id
-    
-    # Only process if admin is setting welcome message
-    if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
-        return
-    
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    await delete_last_message(client, message.chat.id)
-    
-    message_type = None
-    file_id = None
-    caption = message.caption or "Welcome!"
-    
-    if message.photo:
-        message_type = "photo"
-        file_id = message.photo.file_id
-    elif message.video:
-        message_type = "video"
-        file_id = message.video.file_id
-    elif message.animation:
-        message_type = "animation"
-        file_id = message.animation.file_id
-    
-    if message_type and file_id:
-        success = await save_welcome_message(message_type, file_id, caption)
-        
-        if success:
-            del waiting_for_input[user_id]
-            sent = await client.send_message(
-                message.chat.id,
-                f"✅ <b>Welcome message updated!</b>\n\n"
-                f"📝 Type: {message_type}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_admin_menu_markup()
-            )
-            last_bot_messages[message.chat.id] = sent.id
-
-
-@app.on_message(filters.private & filters.text & ~filters.forwarded)
-async def receive_input(client, message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-
-    # Ignore if not waiting for input or if it's a command
-    if user_id not in waiting_for_input or message.text.startswith('/'):
-        return
-
-    try:
-        await message.delete()
-    except:
-        pass
-
-    await delete_last_message(client, chat_id)
-    
-    settings = await get_user_settings(user_id)
-    input_type = waiting_for_input[user_id]
-
-    if input_type == "caption":
-        settings["base_caption"] = message.text
-        await save_user_settings(settings)
-        del waiting_for_input[user_id]
-        sent = await client.send_message(chat_id, "✅ Caption updated!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-        last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "season":
-        if message.text.isdigit():
-            settings["season"] = int(message.text)
-            await save_user_settings(settings)
-            del waiting_for_input[user_id]
-            sent = await client.send_message(chat_id, f"✅ Season updated to {settings['season']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
-            last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "episode":
-        if message.text.isdigit():
-            settings["episode"] = int(message.text)
-            await save_user_settings(settings)
-            del waiting_for_input[user_id]
-            sent = await client.send_message(chat_id, f"✅ Episode updated to {settings['episode']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
-            last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "total_episode":
-        if message.text.isdigit():
-            settings["total_episode"] = int(message.text)
-            await save_user_settings(settings)
-            del waiting_for_input[user_id]
-            sent = await client.send_message(chat_id, f"✅ Total episode updated to {settings['total_episode']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
-            last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "channel_id":
-        text = message.text.strip()
-        
-        try:
-            if text.startswith('@'):
-                chat = await client.get_chat(text)
-            elif text.lstrip('-').isdigit():
-                chat = await client.get_chat(int(text))
-            else:
-                raise ValueError("Invalid format")
-            
-            settings["target_chat_id"] = chat.id
-            await save_user_settings(settings)
-            
-            await save_channel_info(user_id, chat.id, chat.username if hasattr(chat, 'username') and chat.username else None, chat.title if hasattr(chat, 'title') else str(chat.id), str(chat.type))
-            
-            del waiting_for_input[user_id]
-            
-            sent = await client.send_message(
-                chat_id,
-                f"✅ <b>Channel updated!</b>\n\n"
-                f"📝 Title: <b>{chat.title if hasattr(chat, 'title') else 'N/A'}</b>\n"
-                f"🆔 ID: <code>{chat.id}</code>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-            
+            await update.callback_query.message.delete()
         except Exception as e:
-            sent = await client.send_message(
-                chat_id,
-                f"❌ Error: Could not find channel.\n\n{str(e)}",
-                parse_mode=ParseMode.HTML
-            )
-            last_bot_messages[chat_id] = sent.id
-
-
-@app.on_message(filters.private & filters.video)
-async def auto_forward(client, message):
-    user_id = message.from_user.id
+            logger.warning(f"Could not delete subscription prompt message: {e}")
     
-    # Ignore if waiting for input
-    if user_id in waiting_for_input:
+    add_user(user.id, user.username, user.first_name, user.last_name)
+
+    if context.args and len(context.args) > 0:
+        link_id = context.args[0]
+        await handle_channel_link_deep(update, context, link_id)
         return
-    
-    user_lock = get_user_lock(user_id)
-    
-    async with user_lock:
-        settings = await get_user_settings(user_id)
-        
-        if not settings["target_chat_id"]:
-            await message.reply("❌ No target channel set!\n\nUse /start to configure.", parse_mode=ParseMode.HTML)
-            return
-        
-        if not settings["selected_qualities"]:
-            await message.reply("❌ No qualities selected!\n\nUse /start to configure.", parse_mode=ParseMode.HTML)
-            return
 
-        file_id = message.video.file_id
-        quality = settings["selected_qualities"][settings["video_count"] % len(settings["selected_qualities"])]
+    if user.id == ADMIN_ID:
+        await delete_bot_prompt(context, update.effective_chat.id)
+        user_states.pop(user.id, None)
+        await send_admin_menu(update.effective_chat.id, context)
+    else:
+        keyboard = [
+            [InlineKeyboardButton("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)],
+            [InlineKeyboardButton("ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")],
+            [InlineKeyboardButton("ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=REQUEST_CHANNEL_URL)],
+            [
+                InlineKeyboardButton("ᴀʙᴏᴜᴛ ᴍᴇ", callback_data="about_bot"),
+                InlineKeyboardButton("ᴄʟᴏsᴇ", callback_data="close_message")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await context.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=WELCOME_SOURCE_CHANNEL,
+                message_id=WELCOME_SOURCE_MESSAGE_ID,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error copying welcome message: {e}")
+            fallback_text = "👋 <b>Welcome to the bot!</b>"
+            await context.bot.send_message(update.effective_chat.id, fallback_text, parse_mode='HTML', reply_markup=reply_markup)
 
-        caption = settings["base_caption"] \
-            .replace("{season}", f"{settings['season']:02}") \
-            .replace("{episode}", f"{settings['episode']:02}") \
-            .replace("{total_episode}", f"{settings['total_episode']:02}") \
-            .replace("{quality}", quality)
+
+@force_sub_required
+async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID or user_id not in user_states:
+        return
+
+    state = user_states[user_id]
+    text = update.message.text
+
+    await delete_bot_prompt(context, update.effective_chat.id)
+
+    if state == PENDING_BROADCAST:
+        user_states.pop(user_id, None)
+        await broadcast_message_to_all_users(update, context, update.message) 
+        await send_admin_menu(update.effective_chat.id, context)
+        return
+
+    if text is None:
+        await delete_update_message(update, context)
+        msg = await update.message.reply_text("❌ Please send a text message.", parse_mode='HTML')
+        context.user_data['bot_prompt_message_id'] = msg.message_id
+        return
+
+    if state == ADD_CHANNEL_USERNAME:
+        await delete_update_message(update, context)
+        if not text.startswith('@'):
+            msg = await update.message.reply_text("❌ Please include @ in channel username.", parse_mode='HTML')
+            context.user_data['bot_prompt_message_id'] = msg.message_id
+            return
+            
+        context.user_data['channel_username'] = text
+        user_states[user_id] = ADD_CHANNEL_TITLE
+        
+        msg = await update.message.reply_text(
+            "📝 Send channel title now.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 CANCEL", callback_data="manage_force_sub")]])
+        )
+        context.user_data['bot_prompt_message_id'] = msg.message_id
+        
+    elif state == ADD_CHANNEL_TITLE:
+        await delete_update_message(update, context)
+        channel_username = context.user_data.pop('channel_username', None)
+        channel_title = text
+        user_states.pop(user_id, None)
+
+        if add_force_sub_channel(channel_username, channel_title):
+            await update.message.reply_text(
+                f"✅ Channel added: {channel_title} ({channel_username})",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 MANAGE CHANNELS", callback_data="manage_force_sub")]])
+            )
+        else:
+            await update.message.reply_text("❌ Failed to add channel. Check logs for database error.", parse_mode='HTML')
+            
+    elif state == GENERATE_LINK_CHANNEL_USERNAME:
+        await delete_update_message(update, context)
+        channel_identifier = text.strip()
+        if not (channel_identifier.startswith('@') or channel_identifier.startswith('-100') or channel_identifier.lstrip('-').isdigit()):
+            msg = await update.message.reply_text(
+                "❌ Invalid format. Use @username or channel ID (-100...)", parse_mode='HTML'
+            )
+            context.user_data['bot_prompt_message_id'] = msg.message_id
+            return
+            
+        user_states.pop(user_id, None)
+        
+        try:
+            chat = await context.bot.get_chat(channel_identifier)
+            channel_title = chat.title
+        except Exception as e:
+            logger.error(f"Error accessing channel {channel_identifier}: {e}")
+            await update.message.reply_text(
+                "❌ Cannot access channel. Make sure bot is admin in that channel.",
+                parse_mode='HTML'
+            )
+            return
+            
+        # Generate link that persists after redeploy
+        link_id = generate_link_id(str(channel_identifier), user_id, never_expires=True)
+        botname = context.bot.username
+        deep_link = f"https://t.me/{botname}?start={link_id}"
+        await update.message.reply_text(
+            f"🔗 Link generated:\nChannel: {channel_title}\n<code>{deep_link}</code>\n\n⚠️ This link will persist after redeployments.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK TO MENU", callback_data="admin_back")]])
+        )
+
+@force_sub_required
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "verify_subscription":
+        return await start(update, context)
+
+    if user_id == ADMIN_ID and user_id in user_states:
+        current = user_states[user_id]
+        if current in [PENDING_BROADCAST, GENERATE_LINK_CHANNEL_USERNAME, ADD_CHANNEL_TITLE, ADD_CHANNEL_USERNAME] and data in ["admin_back", "manage_force_sub", "user_management"]:
+            await delete_bot_prompt(context, query.message.chat_id)
+            user_states.pop(user_id, None)
+
+    if data == "close_message":
+        try:
+            await query.delete_message()
+        except Exception as e:
+            logger.warning(f"Could not delete message: {e}")
+        return
+
+    elif data.startswith("manage_user_"):
+        if user_id != ADMIN_ID:
+            await query.answer("You are not authorized", show_alert=True)
+            return
+            
+        user_states.pop(user_id, None)
+        await delete_bot_prompt(context, query.message.chat_id)
+        
+        try:
+            target_user_id = int(data[12:]) 
+            await send_single_user_management(query, context, target_user_id)
+        except ValueError:
+            await query.answer("Invalid User ID.", show_alert=True)
+        return
+        
+    elif data.startswith("toggle_ban_"):
+        if user_id != ADMIN_ID:
+            await query.answer("You are not authorized", show_alert=True)
+            return
 
         try:
-            await client.send_video(
-                chat_id=settings["target_chat_id"],
-                video=file_id,
-                caption=caption,
-                parse_mode=ParseMode.HTML
-            )
-            
-            await log_upload(user_id, settings['season'], settings['episode'], settings['total_episode'], quality, file_id, caption, settings['target_chat_id'])
+            parts = data.split('_')
+            target_user_id = int(parts[2].lstrip('f'))
+            target_status = int(parts[3].lstrip('f'))
 
-            reply_msg = await message.reply(
-                f"✅ <b>Video forwarded!</b>\n\n"
-                f"📺 Season: {settings['season']}\n"
-                f"🎬 Episode: {settings['episode']}\n"
-                f"🎥 Quality: {quality}\n"
-                f"📊 Progress: {settings['video_count'] + 1}/{len(settings['selected_qualities'])}",
-                parse_mode=ParseMode.HTML
-            )
+            if target_user_id == ADMIN_ID:
+                await query.answer("Cannot ban self!", show_alert=True)
+                await send_single_user_management(query, context, target_user_id) 
+                return
+
+            if target_status == 1:
+                ban_user(target_user_id)
+                action = "banned"
+            else:
+                unban_user(target_user_id)
+                action = "unbanned"
             
-            await asyncio.sleep(5)
+            await send_single_user_management(query, context, target_user_id) 
+            await query.answer(f"User {target_user_id} successfully {action}.", show_alert=True)
+
+        except Exception as e:
+            logger.error(f"Error handling ban/unban: {e}")
+            await query.answer("Error processing request.", show_alert=True)
+
+    elif data == "admin_broadcast_start":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        user_states[user_id] = PENDING_BROADCAST
+        
+        try: await query.delete_message()
+        except: pass
+
+        msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="📣 Send the message (text, photo, video, etc.) to broadcast now.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 CANCEL", callback_data="admin_back")]])
+        )
+        context.user_data['bot_prompt_message_id'] = msg.message_id
+        return
+
+    elif data == "admin_stats":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        await send_admin_stats(query, context)
+
+    elif data == "user_management":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+            
+        user_states.pop(user_id, None)
+        await delete_bot_prompt(context, query.message.chat_id)
+        
+        await send_user_management(query, context, offset=0)
+
+    elif data.startswith("user_page_"):
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        try:
+            offset = int(data[10:])
+        except:
+            offset = 0
+        await send_user_management(query, context, offset=offset)
+
+    elif data == "manage_force_sub":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        await show_force_sub_management(query, context)
+
+    elif data == "generate_links":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        user_states[user_id] = GENERATE_LINK_CHANNEL_USERNAME
+        
+        try: await query.delete_message()
+        except: pass
+        
+        msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="🔗 Send channel username or ID to generate deep link.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 CANCEL", callback_data="admin_back")]])
+        )
+        context.user_data['bot_prompt_message_id'] = msg.message_id
+        
+    elif data == "add_channel_start":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        user_states[user_id] = ADD_CHANNEL_USERNAME
+        
+        try: await query.delete_message()
+        except: pass
+        
+        msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="📢 Send @username of channel to add to force-sub list.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 CANCEL", callback_data="manage_force_sub")]])
+        )
+        context.user_data['bot_prompt_message_id'] = msg.message_id
+
+    elif data.startswith("channel_"):
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        await show_channel_details(query, context, data[8:])
+
+    elif data.startswith("delete_"):
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        channel_username_clean = data[7:]
+        channel_username = '@' + channel_username_clean
+        channel_info = get_force_sub_channel_info(channel_username)
+        if channel_info:
+            keyboard = [
+                [InlineKeyboardButton("✅ YES, DELETE", callback_data=f"confirm_delete_{channel_username_clean}")],
+                [InlineKeyboardButton("❌ NO, CANCEL", callback_data=f"channel_{channel_username_clean}")]
+            ]
+            await query.edit_message_text(
+                f"🗑️ Confirm deletion of {channel_info[1]} ({channel_info[0]})?",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    elif data.startswith("confirm_delete_"):
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        channel_username_clean = data[15:]
+        channel_username = '@' + channel_username_clean
+        delete_force_sub_channel(channel_username)
+        await query.edit_message_text(
+            f"✅ Channel {channel_username} removed from force-sub list.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Manage Channels", callback_data="manage_force_sub")]])
+        )
+        
+    elif data == "delete_channel_prompt":
+        if user_id != ADMIN_ID:
+            await query.edit_message_text("❌ Admin only", parse_mode='HTML')
+            return
+        channels = get_all_force_sub_channels()
+        if not channels:
+            await query.answer("No channels to delete!", show_alert=True)
+            return
+
+        text = "🗑️ Choose a channel to delete (set inactive):"
+        keyboard = []
+        for uname, title in channels:
+            keyboard.append([InlineKeyboardButton(title, callback_data=f"delete_{uname.lstrip('@')}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="manage_force_sub")])
+        await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data in ["admin_back", "user_back", "channels_back"]:
+        if user_id == ADMIN_ID:
+            await send_admin_menu(query.message.chat_id, context, query)
+        else:
+            keyboard = [
+                [InlineKeyboardButton("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)],
+                [InlineKeyboardButton("ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")],
+                [InlineKeyboardButton("ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=REQUEST_CHANNEL_URL)],
+                [
+                    InlineKeyboardButton("ᴀʙᴏᴜᴛ ᴍᴇ", callback_data="about_bot"),
+                    InlineKeyboardButton("ᴄʟᴏsᴇ", callback_data="close_message")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             try:
-                await reply_msg.delete()
-                await message.delete()
+                await query.delete_message()
             except:
                 pass
+            try:
+                await context.bot.copy_message(
+                    chat_id=query.message.chat_id,
+                    from_chat_id=WELCOME_SOURCE_CHANNEL,
+                    message_id=WELCOME_SOURCE_MESSAGE_ID,
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.error(f"Error copying back message: {e}")
+                fallback = "🏠 <b>Main Menu</b>"
+                await context.bot.send_message(query.message.chat_id, fallback, parse_mode='HTML', reply_markup=reply_markup)
 
-            settings["video_count"] += 1
+    elif data == "about_bot":
+        about_text = (
+            "<b>About Us</b>\n\n"
+            "Developed by @Beat_Anime_Ocean"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 BACK", callback_data="user_back")]]
+        try:
+            await query.delete_message()
+        except:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=about_text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
-            if settings["video_count"] >= len(settings["selected_qualities"]):
-                settings["episode"] += 1
-                settings["total_episode"] += 1
-                settings["video_count"] = 0
+async def handle_channel_link_deep(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id):
+    link_info = get_link_info(link_id)
+    if not link_info:
+        await update.message.reply_text("❌ This link is invalid or not registered.", parse_mode='HTML')
+        return
 
-            await save_user_settings(settings)
+    channel_identifier, creator_id, created_time, never_expires = link_info
 
+    try:
+        if isinstance(channel_identifier, str) and channel_identifier.lstrip('-').isdigit():
+            channel_identifier = int(channel_identifier)
+            
+        # Check if link has expired (unless it's set to never expire)
+        if not never_expires:
+            created_dt = datetime.fromisoformat(str(created_time))
+            if datetime.now() > created_dt + timedelta(minutes=LINK_EXPIRY_MINUTES):
+                await update.message.reply_text("❌ This link has expired.", parse_mode='HTML')
+                return
+
+        chat = await context.bot.get_chat(channel_identifier)
+        invite_link = await context.bot.create_chat_invite_link(
+            chat.id,
+            expire_date=datetime.now().timestamp() + LINK_EXPIRY_MINUTES * 60
+        )
+
+        expiry_text = "Never expires" if never_expires else f"{LINK_EXPIRY_MINUTES} minutes"
+        success_message = (
+            f"<b>ʜᴇʀᴇ ɪs ʏᴏᴜʀ ʟɪɴᴋ! ᴄʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ᴘʀᴏᴄᴇᴇᴅ</b>\n\n"
+            f"<b><u>Note: If the link is expired, please click the post link again to get a new one.</u></b>"
+        )
+        keyboard = [[InlineKeyboardButton("• 𝗝𝗢𝗜𝗡 𝗖𝗛𝗔𝗡𝗡𝗘𝗟 •", url=invite_link.invite_link)]]
+        await update.message.reply_text(
+            success_message,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error generating invite link: {e}")
+        await update.message.reply_text("❌ Error creating invite link. Contact admin.", parse_mode='HTML')
+
+async def broadcast_worker_job(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue worker to send a message to a single chunk of users."""
+    job_data = context.job.data
+    offset = job_data['offset']
+    chunk_size = job_data['chunk_size']
+    message_chat_id = job_data['message_chat_id']
+    message_id = job_data['message_id']
+    is_last_chunk = job_data['is_last_chunk']
+    admin_chat_id = job_data['admin_chat_id']
+
+    users_chunk = get_all_users(limit=chunk_size, offset=offset)
+    sent_count = 0
+    fail_count = 0
+
+    for user in users_chunk:
+        target_user_id = user[0]
+        try:
+            await context.bot.copy_message(
+                chat_id=target_user_id,
+                from_chat_id=message_chat_id,
+                message_id=message_id
+            )
+            sent_count += 1
         except Exception as e:
-            logger.error(f"Error forwarding video: {e}")
-            await message.reply(
-                f"❌ <b>Error forwarding!</b>\n\n"
-                f"Make sure:\n"
-                f"• Bot is admin in channel\n"
-                f"• Channel ID is correct: <code>{settings['target_chat_id']}</code>",
-                parse_mode=ParseMode.HTML
-            )
+            logger.warning(f"Failed send to {target_user_id} (Offset: {offset}): {e}")
+            fail_count += 1
+        await asyncio.sleep(0.05) 
 
-# ----------------------------------------------------------------------
-# FIX APPLIED: Replaced the non-existent 'app.updates.put' with the 
-# correct 'asyncio.create_task(app.invoke_update(update_dict))'
-# ----------------------------------------------------------------------
-
-async def telegram_webhook(request):
-    """Handle incoming webhook updates from Telegram using Pyrogram's internal dispatching."""
-    try:
-        update_dict = await request.json()
-        update_id = update_dict.get('update_id', 'unknown')
-        
-        logger.info(f"📨 Webhook received update ID: {update_id}")
-        
-        # This is the correct, non-blocking way to feed raw updates 
-        # to the modern Pyrogram client (v2.x).
-        asyncio.create_task(app.invoke_update(update_dict))
-
-        # Always return a 200 OK response quickly to Telegram
-        return web.Response(status=200, text="OK")
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
-        # Returning 200 OK prevents Telegram from resending the update repeatedly.
-        return web.Response(status=200, text="OK")
-
-# The function 'process_update_manually' has been REMOVED.
-# ----------------------------------------------------------------------
-
-
-async def health_check(request):
-    total_users = await get_all_users_count()
-    return web.Response(text=f"Bot running! Users: {total_users}", content_type='text/plain')
-
-
-async def stats_endpoint(request):
-    total_users = await get_all_users_count()
-    return web.json_response({
-        'status': 'running',
-        'total_users': total_users,
-        'timestamp': datetime.utcnow().isoformat(),
-        'webhook': WEBHOOK_URL if WEBHOOK_URL else 'polling'
-    })
-
-
-async def setup_webhook():
-    """Set up Telegram webhook"""
-    if not WEBHOOK_URL:
-        logger.warning("⚠️ WEBHOOK_URL not set, using polling mode")
-        return False
+    logger.info(f"Broadcast chunk from offset {offset} finished. Sent {sent_count} messages, Failed {fail_count}.")
     
+    await context.bot.send_message(
+        chat_id=admin_chat_id,
+        text=f"✅ **Broadcast Progress:**\nChunk {offset // chunk_size + 1} sent to {sent_count} users (Offset: {offset}). Failed: {fail_count}.",
+        parse_mode='Markdown'
+    )
+
+    if is_last_chunk:
+        total_users = get_user_count() 
+        await context.bot.send_message(
+            chat_id=admin_chat_id,
+            text=f"🎉 **BROADCAST COMPLETE!**\nTotal users attempted: {total_users}.",
+            parse_mode='Markdown'
+        )
+
+async def broadcast_message_to_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE, message_to_copy):
+    admin_chat_id = update.effective_chat.id
+    total_users = get_user_count()
+
+    if total_users < BROADCAST_MIN_USERS:
+        await update.message.reply_text(f"🔄 Broadcasting to {total_users} users (below threshold, no block delay)...", parse_mode='HTML')
+        sent = 0
+        all_users = get_all_users(limit=None, offset=0)
+        for u in all_users:
+            target = u[0]
+            try:
+                await context.bot.copy_message(chat_id=target, from_chat_id=message_to_copy.chat_id, message_id=message_to_copy.message_id)
+                sent += 1
+            except Exception as e:
+                logger.warning(f"Failed send to {target}: {e}")
+            await asyncio.sleep(0.05)
+        await context.bot.send_message(chat_id=admin_chat_id, text=f"✅ **Broadcast Complete!**\nTotal attempted: {total_users}.\nSuccessfully sent: {sent}.", parse_mode='Markdown')
+        try: await update.message.delete()
+        except: pass
+        return
+
+    await update.message.reply_text(
+        f"⏳ **Throttled Broadcast Started!**\n"
+        f"Total users: {total_users}.\n"
+        f"Sending in chunks of {BROADCAST_CHUNK_SIZE} every {BROADCAST_INTERVAL_MIN} minutes.",
+        parse_mode='Markdown'
+    )
+
+    offset = 0
+    current_delay = 0 
+    chunks_sent = 0
+    total_chunks = (total_users + BROADCAST_CHUNK_SIZE - 1) // BROADCAST_CHUNK_SIZE
+
+    while offset < total_users:
+        is_last_chunk = (offset + BROADCAST_CHUNK_SIZE) >= total_users
+        
+        job_data = {
+            'offset': offset,
+            'chunk_size': BROADCAST_CHUNK_SIZE,
+            'message_chat_id': message_to_copy.chat_id,
+            'message_id': message_to_copy.message_id,
+            'is_last_chunk': is_last_chunk,
+            'admin_chat_id': admin_chat_id,
+        }
+        
+        context.job_queue.run_once(
+            broadcast_worker_job, 
+            when=current_delay, 
+            data=job_data,
+            name=f"broadcast_chunk_{chunks_sent}"
+        )
+
+        offset += BROADCAST_CHUNK_SIZE
+        current_delay += BROADCAST_INTERVAL_MIN * 60 
+        chunks_sent += 1
+
+    await update.message.reply_text(
+        f"Scheduled **{total_chunks}** broadcast chunks, running over **{current_delay // 60} minutes**.\n"
+        f"You will receive a notification after each chunk is sent.",
+        parse_mode='Markdown'
+    )
+    
+    try: await update.message.delete()
+    except: pass
+
+async def send_admin_menu(chat_id, context, query=None):
+    if query:
+        try:
+            await query.delete_message()
+        except:
+            pass
+            
+    context.user_data.pop('bot_prompt_message_id', None)
+    user_states.pop(chat_id, None) 
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 BOT STATS", callback_data="admin_stats")],
+        [InlineKeyboardButton("📢 MANAGE FORCE SUB CHANNELS", callback_data="manage_force_sub")],
+        [InlineKeyboardButton("🔗 GENERATE CHANNEL LINKS", callback_data="generate_links")],
+        [InlineKeyboardButton("📣 START MEDIA BROADCAST", callback_data="admin_broadcast_start")],
+        [InlineKeyboardButton("👤 USER MANAGEMENT", callback_data="user_management")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "👨‍💼 <b>ADMIN PANEL</b>\n\nChoose an option:"
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=reply_markup)
+
+async def send_admin_stats(query, context):
     try:
-        # Use raw API call to set webhook
-        import httpx
-        
-        telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-        
-        # Delete existing webhook
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{telegram_api_url}/deleteWebhook",
-                json={"drop_pending_updates": True}
-            )
-            result = response.json()
-            if result.get('ok'):
-                logger.info("🗑️ Deleted old webhook")
-            
-            # Set new webhook
-            response = await client.post(
-                f"{telegram_api_url}/setWebhook",
-                json={
-                    "url": WEBHOOK_URL,
-                    "drop_pending_updates": True,
-                    "allowed_updates": ["message", "callback_query"]
-                }
-            )
-            result = response.json()
-            
-            if result.get('ok'):
-                logger.info(f"✅ Webhook set successfully: {WEBHOOK_URL}")
-                
-                # Verify webhook
-                response = await client.get(f"{telegram_api_url}/getWebhookInfo")
-                webhook_info = response.json()
-                
-                if webhook_info.get('ok'):
-                    info = webhook_info['result']
-                    logger.info(f"📡 Webhook URL: {info.get('url', 'N/A')}")
-                    logger.info(f"📊 Pending updates: {info.get('pending_update_count', 0)}")
-                    if info.get('last_error_message'):
-                        logger.warning(f"⚠️ Last error: {info.get('last_error_message')}")
-                
-                return True
-            else:
-                logger.error(f"❌ Failed to set webhook: {result.get('description', 'Unknown error')}")
-                return False
-            
-    except Exception as e:
-        logger.error(f"❌ Webhook setup error: {e}")
-        return False
+        await query.delete_message()
+    except:
+        pass
+    user_count = get_user_count()
+    channel_count = len(get_all_force_sub_channels()) 
+    stats_text = (
+        "📊 <b>BOT STATISTICS</b>\n\n"
+        f"👤 Total Users: {user_count}\n"
+        f"📢 Force Sub Channels: {channel_count}\n"
+        f"🔗 Link Expiry: {LINK_EXPIRY_MINUTES} minutes"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🔄 REFRESH", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔙 BACK", callback_data="admin_back")]
+    ]
+    await context.bot.send_message(chat_id=query.message.chat_id, text=stats_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def show_force_sub_management(query, context):
+    channels = get_all_force_sub_channels(return_usernames_only=False)
+    channels_text = "📢 <b>FORCE SUBSCRIPTION CHANNELS</b>\n\n"
+    if not channels:
+        channels_text += "No channels configured."
+    else:
+        channels_text += "<b>Configured Channels:</b>\n"
+        for uname, title in channels:
+            channels_text += f"• {title} (<code>{uname}</code>)\n"
+    
+    keyboard = [[InlineKeyboardButton("➕ ADD NEW CHANNEL", callback_data="add_channel_start")]]
+    
+    if channels:
+        buttons = [InlineKeyboardButton(title, callback_data=f"channel_{uname.lstrip('@')}") for uname, title in channels]
+        grouped = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+        keyboard.extend(grouped)
+        
+        keyboard.append([InlineKeyboardButton("🗑️ DELETE CHANNEL", callback_data="delete_channel_prompt")]) 
+    
+    keyboard.append([InlineKeyboardButton("🔙 BACK TO MENU", callback_data="admin_back")])
+    try:
+        await query.edit_message_text(text=channels_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+    except:
+        await context.bot.send_message(chat_id=query.message.chat_id, text=channels_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def self_ping():
-    await asyncio.sleep(60)
+async def show_channel_details(query, context, channel_username_clean):
+    channel_username = '@' + channel_username_clean
+    channel_info = get_force_sub_channel_info(channel_username)
+    if not channel_info:
+        await query.edit_message_text(
+            "❌ Channel not found.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="manage_force_sub")]])
+        )
+        return
+    uname, title = channel_info
+    details = (
+        f"📢 <b>CHANNEL DETAILS</b>\n\n"
+        f"<b>Title:</b> {title}\n"
+        f"<b>Username:</b> <code>{uname}</code>\n"
+        f"<i>Choose an action:</i>"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🔗 GENERATE TEMP LINK", callback_data=f"genlink_{channel_username_clean}")],
+        [InlineKeyboardButton("🗑️ DELETE CHANNEL", callback_data=f"delete_{channel_username_clean}")],
+        [InlineKeyboardButton("🔙 BACK", callback_data="manage_force_sub")]
+    ]
+    await query.edit_message_text(text=details, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def send_single_user_management(query, context, target_user_id):
+    """Shows details and ban/unban buttons for a single user."""
+    user_info = get_user_info_by_id(target_user_id)
+    
+    if not user_info:
+        await query.edit_message_text(
+            f"❌ User ID **{target_user_id}** not found.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK TO USER LIST", callback_data="user_management")]])
+        )
+        return
+
+    uid, username, fname, lname, joined, is_banned = user_info
+    
+    uname_display = f"@{username}" if username else "N/A"
+    name = f"{fname or ''} {lname or ''}".strip() or "N/A"
+    status = "🚫 **BANNED**" if is_banned else "✅ **Active**"
+    
+    text = (
+        f"👤 <b>USER DETAILS</b>\n\n"
+        f"**Name:** {name}\n"
+        f"**ID:** <code>{uid}</code>\n"
+        f"**Username:** <code>{uname_display}</code>\n"
+        f"**Joined:** {joined}\n"
+        f"**Status:** {status}\n\n"
+    )
+
+    action_button_text = "✅ UNBAN USER" if is_banned else "🚫 BAN USER"
+    action_status = 1 - is_banned
+    
+    keyboard = [
+        [InlineKeyboardButton(
+            action_button_text, 
+            callback_data=f"toggle_ban_f{uid}_f{action_status}" 
+        )],
+        [InlineKeyboardButton("🔙 BACK TO USER LIST", callback_data="user_management")]
+    ]
+    
+    await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def send_user_management(query, context, offset=0):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("You are not authorized", show_alert=True)
+        return
+    
+    total = get_user_count()
+    users = get_all_users(limit=10, offset=offset) 
+    has_next = total > offset + 10
+    has_prev = offset > 0
+    
+    text = f"👤 <b>USER MANAGEMENT</b>\n\n"
+    text += f"Showing {offset+1}-{min(offset+10, total)} of {total} total users.\n\n"
+    
+    management_keyboard = []
+
+    for (uid, username, fname, lname, joined, is_banned) in users:
+        uname_display = f"@{username}" if username else f"ID: {uid}"
+        name = f"{fname or ''} {lname or ''}".strip() or "N/A"
+        
+        status_icon = '🚫' if is_banned else '✅'
+        text += f"{status_icon} **{name}** (<code>{uname_display}</code>)\n"
+
+        management_keyboard.append([
+            InlineKeyboardButton(
+                f"👤 MANAGE: {name}",
+                callback_data=f"manage_user_{uid}"
+            )
+        ])
+        
+    final_keyboard = management_keyboard
+    
+    nav = []
+    if has_prev:
+        nav.append(InlineKeyboardButton("⬅️ PREV", callback_data=f"user_page_{offset-10}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("NEXT ➡️", callback_data=f"user_page_{offset+10}"))
+    if nav:
+        final_keyboard.append(nav)
+        
+    final_keyboard.append([InlineKeyboardButton("🔙 BACK TO MENU", callback_data="admin_back")])
+
+    await query.edit_message_text(text=text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(final_keyboard))
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Exception in update: {context.error}")
+
+async def cleanup_task(context: ContextTypes.DEFAULT_TYPE):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cutoff = datetime.now() - timedelta(days=7)
+    # Only delete expired links that are not set to never expire
+    cursor.execute('DELETE FROM generated_links WHERE created_time < %s AND never_expires = FALSE', (cutoff,))
+    conn.commit()
+    conn.close()
+
+def keep_alive():
     while True:
-        await asyncio.sleep(600)
-        if RENDER_EXTERNAL_URL:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{RENDER_EXTERNAL_URL}/health") as resp:
-                        logger.info(f"✅ Self-ping: {resp.status}")
-            except Exception as e:
-                logger.error(f"❌ Self-ping failed: {e}")
-
-
-async def start_web_server():
-    # Add webhook endpoint
-    if WEBHOOK_URL:
-        web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
-        logger.info(f"🔗 Webhook endpoint: {WEBHOOK_PATH}")
-    
-    web_app.router.add_get('/health', health_check)
-    web_app.router.add_get('/', health_check)
-    web_app.router.add_get('/stats', stats_endpoint)
-    
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"✅ Web server started on port {PORT}")
-
-
-async def main():
-    # Start web server
-    logger.info("🌐 Starting web server...")
-    await start_web_server()
-    
-    # Initialize database
-    logger.info("🗄️ Initializing database...")
-    await init_db()
-    
-    # Start bot
-    logger.info("🚀 Starting bot...")
-    
-    try:
-        await app.start()
-        
-        me = await app.get_me()
-        logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
-        
-        # Setup webhook if URL is provided
-        if WEBHOOK_URL:
-            webhook_success = await setup_webhook()
-            if webhook_success:
-                logger.info("🔗 Running in WEBHOOK mode")
-            else:
-                logger.warning("⚠️ Webhook setup failed, falling back to POLLING mode")
-        else:
-            logger.info("📡 Running in POLLING mode")
-        
-        logger.info("=" * 50)
-        logger.info("✅ ALL SYSTEMS OPERATIONAL")
-        logger.info("=" * 50)
-        
-        # Start self-ping
-        asyncio.create_task(self_ping())
-        
-        # Keep alive
-        while True:
-            await asyncio.sleep(3600)
-        
-    except Exception as e:
-        logger.error(f"❌ Error: {e}")
-        raise
-    finally:
-        logger.info("🛑 Shutting down...")
+        time.sleep(300)
         try:
-            if WEBHOOK_URL:
-                # Delete webhook on shutdown
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-                        json={"drop_pending_updates": False}
-                    )
-                logger.info("🗑️ Webhook deleted")
-            await app.stop()
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
-        if db_pool:
-            try:
-                await db_pool.close()
-            except:
-                pass
+            requests.get("https://www.google.com/robots.txt", timeout=10)
+        except:
+            pass
 
+def main():
+    init_db()
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_TOKEN_HERE":
+        logger.error("BOT_TOKEN not set!")
+        return
+    
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL not set! Add your Neon PostgreSQL connection string.")
+        return
+
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Test PostgreSQL connection
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT version();')
+        version = cursor.fetchone()
+        logger.info(f"✅ Connected to PostgreSQL: {version[0][:50]}...")
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Database connection failed: {e}")
+        return
+    
+    if os.path.exists('restart_message.json'):
+        try:
+            with open('restart_message.json', 'r') as f:
+                restart_info = json.load(f)
+            os.remove('restart_message.json') 
+
+            original_chat_id = restart_info['chat_id']
+            admin_id = restart_info['admin_id']
+            message_id_to_copy = restart_info.get('message_id_to_copy') 
+
+            async def post_restart_notification(context: ContextTypes.DEFAULT_TYPE):
+                try:
+                    await context.bot.send_message(
+                        chat_id=original_chat_id, 
+                        text="✅ **Bot reloaded!** Service has been successfully reset.",
+                        parse_mode='Markdown'
+                    )
+                    
+                    if message_id_to_copy:
+                        if message_id_to_copy == 'admin':
+                             await send_admin_menu(original_chat_id, context)
+                             return
+                        
+                        try:
+                            await context.bot.copy_message(
+                                chat_id=original_chat_id,
+                                from_chat_id=WELCOME_SOURCE_CHANNEL,
+                                message_id=message_id_to_copy
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to copy custom restart message ID {message_id_to_copy}: {e}")
+                            await context.bot.send_message(
+                                chat_id=original_chat_id,
+                                text="⚠️ **Custom message copy failed.** Falling back to Admin Panel.",
+                                parse_mode='Markdown'
+                            )
+                            await send_admin_menu(original_chat_id, context) 
+                    else:
+                        await send_admin_menu(original_chat_id, context) 
+                    
+                    if admin_id != original_chat_id: 
+                         await context.bot.send_message(
+                            chat_id=admin_id, 
+                            text="⚠️ **System Notification:** The bot has successfully reloaded.",
+                            parse_mode='Markdown'
+                        )
+
+                except Exception as e:
+                    logger.error(f"Failed to send post-restart notification: {e}")
+
+            application.job_queue.run_once(post_restart_notification, 1) 
+            logger.info("Post-restart notification scheduled.")
+            
+        except Exception as e:
+            logger.error(f"Error processing restart_message.json: {e}")
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    admin_filter = filters.User(user_id=ADMIN_ID)
+    application.add_handler(CommandHandler("reload", reload_command, filters=admin_filter))
+    application.add_handler(CommandHandler("stats", stats_command, filters=admin_filter)) 
+    application.add_handler(CommandHandler("addchannel", add_channel_command, filters=admin_filter))
+    application.add_handler(CommandHandler("removechannel", remove_channel_command, filters=admin_filter))
+    application.add_handler(CommandHandler("banuser", ban_user_command, filters=admin_filter))
+    application.add_handler(CommandHandler("unbanuser", unban_user_command, filters=admin_filter))
+    
+    application.add_handler(MessageHandler(admin_filter & ~filters.COMMAND, handle_admin_message))
+    
+    application.add_error_handler(error_handler)
+
+    if application.job_queue:
+        application.job_queue.run_repeating(cleanup_task, interval=600, first=10)
+# === Health Check Server for UptimeRobot / Render ===
+import threading
+from aiohttp import web
+
+async def health(request):
+    """Responds with 200 OK for uptime pings."""
+    return web.Response(text="OK")
+
+def start_health_server():
+    """
+    Runs a small aiohttp web server on "/" for uptime checks.
+    Render counts this external ping as valid traffic.
+    """
+    app = web.Application()
+    app.router.add_get("/", health)
+
+    port = int(os.environ.get("PORT", 8080))
+    threading.Thread(
+        target=lambda: web.run_app(app, host="0.0.0.0", port=port),
+        daemon=True
+    ).start()
+# =====================================================
+
+
+    
+if WEBHOOK_URL and BOT_TOKEN:
+    # Start the simple HTTP health endpoint for UptimeRobot
+    start_health_server()
+
+    # (Optional) simple internal ping thread — harmless but not needed for uptime
+    keep_alive_thread = Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
+
+    # Start Telegram webhook listener
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=WEBHOOK_URL + BOT_TOKEN
+    )
+else:
+    # Fallback: polling mode (for local debugging)
+    start_health_server()
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
+
+
