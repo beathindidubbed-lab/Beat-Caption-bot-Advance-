@@ -1110,31 +1110,27 @@ async def auto_forward(client, message):
 
 
 # ----------------------------------------------------------------------
-# FINAL FIX: Using app.dispatcher.updates_queue.put_nowait() to handle 
-# raw webhook updates reliably in Pyrogram 2.x
+# THE WEBHOOK FIX
+# Simplified to put the update directly into Pyrogram's internal queue
 # ----------------------------------------------------------------------
-
 async def telegram_webhook(request):
-    """Handle incoming webhook updates from Telegram using Pyrogram's internal dispatching queue."""
+    """Handle incoming webhook updates from Telegram"""
     try:
         update_dict = await request.json()
         update_id = update_dict.get('update_id', 'unknown')
         
         logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        # This is the most reliable low-level, non-blocking way to feed raw updates 
-        # into the Pyrogram Dispatcher's queue across Pyrogram 2.x versions.
-        # put_nowait() is synchronous and ensures the webhook responds immediately (200 OK).
-        app.dispatcher.updates_queue.put_nowait(update_dict) 
-
-        # Always return a 200 OK response quickly to Telegram
+        # FIX: Put the raw update dictionary into Pyrogram's queue
+        # The dispatcher (kept alive by app.join() in main) will process it.
+        await app.dispatcher.updates_queue.put(update_dict)
+        
         return web.Response(status=200, text="OK")
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
-        # Returning 200 OK prevents Telegram from resending the update repeatedly.
         return web.Response(status=200, text="OK")
-
-# The redundant and error-prone process_update_manually function has been removed.
+# ----------------------------------------------------------------------
+# process_update_manually function removed
 # ----------------------------------------------------------------------
 
 
@@ -1275,9 +1271,8 @@ async def main():
         # Start self-ping
         asyncio.create_task(self_ping())
         
-        # Keep alive
-        while True:
-            await asyncio.sleep(3600)
+        # THE FIX: This correctly waits for Pyrogram's internal dispatcher to run forever.
+        await app.join()
         
     except Exception as e:
         logger.error(f"❌ Error: {e}")
