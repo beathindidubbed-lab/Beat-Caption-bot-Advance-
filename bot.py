@@ -1166,7 +1166,8 @@ async def process_update_manually(update_dict):
             
             try:
                 # Create Message object using Pyrogram's internal parser
-                message = types.Message._parse(app, msg_data, {}, None)
+                # FIX: Added 'await' to resolve AttributeError
+                message = await types.Message._parse(app, msg_data, {}, None)
                 logger.info(f"✅ Message object created: ID={message.id}, User={message.from_user.id if message.from_user else 'N/A'}")
                 
                 # Get all handlers
@@ -1211,7 +1212,8 @@ async def process_update_manually(update_dict):
             
             try:
                 # Create CallbackQuery object
-                callback_query = types.CallbackQuery._parse(app, cb_data, {})
+                # FIX: Added 'await' to resolve AttributeError
+                callback_query = await types.CallbackQuery._parse(app, cb_data, {})
                 logger.info(f"✅ CallbackQuery object created: {callback_query.data}")
                 
                 # Trigger callback query handlers
@@ -1318,7 +1320,6 @@ async def self_ping():
 
 
 async def start_web_server():
-    global web_app # FIX: Access the global aiohttp.web.Application object
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
