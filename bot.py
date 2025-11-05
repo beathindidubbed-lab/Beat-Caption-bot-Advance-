@@ -72,6 +72,9 @@ waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
 
+# Web server
+web_app = web.Application()
+
 
 def get_user_lock(user_id):
     """Get or create a lock for a specific user"""
@@ -1126,6 +1129,13 @@ async def telegram_webhook(request):
             import pyrogram.raw.types as raw_types
             import pyrogram.raw.functions as raw_functions
             
+            # Put the raw update in the queue for processing
+            update_obj = raw_types.UpdateNewMessage(
+                message=msg_dict,
+                pts=0,
+                pts_count=0
+            )
+            
             # Trigger manual processing
             asyncio.create_task(process_update_manually(update_dict))
         
@@ -1156,8 +1166,7 @@ async def process_update_manually(update_dict):
             
             try:
                 # Create Message object using Pyrogram's internal parser
-                # FIX: Add 'await' to resolve the 'coroutine' object
-                message = await types.Message._parse(app, msg_data, {}, None) 
+                message = types.Message._parse(app, msg_data, {}, None)
                 logger.info(f"✅ Message object created: ID={message.id}, User={message.from_user.id if message.from_user else 'N/A'}")
                 
                 # Get all handlers
@@ -1182,16 +1191,12 @@ async def process_update_manually(update_dict):
                                         logger.info(f"✅ EXECUTING handler: {handler_name}")
                                         await handler.callback(app, message)
                                         logger.info(f"✅ Handler {handler_name} completed")
-                                        # Only break if handler is for a command (or is meant to be exclusive)
-                                        if 'command' in str(handler.filters): # Simple check for common filters
-                                            break
-                                        if handler_count > 10: # Safety break in case of too many handlers
-                                            break
+                                        break
                                 else:
                                     # No filters, always execute
                                     logger.info(f"✅ EXECUTING handler (no filters): {handler_name}")
                                     await handler.callback(app, message)
-                                    break # Assuming all messages should be handled by one (like the forward handler)
+                                    break
                             except Exception as e:
                                 logger.error(f"❌ Handler {handler_name} error: {e}", exc_info=True)
                 
@@ -1313,6 +1318,7 @@ async def self_ping():
 
 
 async def start_web_server():
+    global web_app # FIX: Add global declaration for web_app
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
