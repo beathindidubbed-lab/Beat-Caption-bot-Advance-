@@ -679,7 +679,7 @@ async def admin_command(client, message):
     admin_text = (
         f"👑 <b>Admin Panel</b>\n\n"
         f"📊 <b>Global Statistics:</b>\n"
-        f"• Total Users: <code>{total_users}</code>\n\n"
+        f"• Total Users: <code>{total_users}</code>\n"
         f"🤖 Bot Status: ✅ Running\n"
         f"👤 Your Admin ID: <code>{user_id}</code>"
     )
@@ -923,8 +923,6 @@ async def handle_buttons(client, callback_query: CallbackQuery):
                 )
             else:
                 await callback_query.message.reply("❌ Invalid message type stored.")
-        else:
-            await callback_query.message.reply("❌ No custom welcome message is set.")
             
         await client.send_message(
             chat_id, get_string("menu_welcome"),
@@ -1329,11 +1327,13 @@ async def process_update_manually(update_dict):
     """
     FIXED: Process updates from webhook using Pyrogram's standard dispatcher method.
     This replaces the unreliable manual object construction to fix the RuntimeWarning.
+    
+    The function name is now process_updates and takes a list of updates, even if only one.
     """
     try:
-        # Pass the raw update dictionary directly to the dispatcher for processing.
-        # This is the Pyrogram-supported way to handle external updates.
-        await app.dispatcher.process_update(update_dict)
+        # FIX: Replaced the incorrect app.dispatcher.process_update with app.process_updates
+        # This method handles a list of raw updates (JSON dictionaries) received from the webhook.
+        await app.process_updates([update_dict])
         logger.info("✅ Update dispatched successfully.")
     except Exception as e:
         logger.error(f"❌ Error processing update manually via dispatcher: {e}", exc_info=True)
