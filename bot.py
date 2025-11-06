@@ -1180,44 +1180,74 @@ async def process_update_manually(update_dict):
                     client=app
                 )
                 
+                # Set additional attributes that filters might check
+                message_obj.outgoing = False
+                message_obj.mentioned = False
+                message_obj.scheduled = False
+                message_obj.from_scheduled = False
+                message_obj.has_protected_content = False
+                
+                # Add entities if present (for command detection)
+                if msg.get('entities'):
+                    message_obj.entities = []
+                    for ent in msg.get('entities', []):
+                        if ent.get('type') == 'bot_command':
+                            # Create a simple entity object
+                            entity = type('MessageEntity', (), {
+                                'type': 'bot_command',
+                                'offset': ent.get('offset'),
+                                'length': ent.get('length')
+                            })()
+                            message_obj.entities.append(entity)
+                
                 # Add command info if it's a command
-                if msg.get('text', '').startswith('/'):
-                    message_obj.command = msg.get('text', '').split()[0][1:].split('@')[0]
+                text = msg.get('text', '')
+                if text.startswith('/'):
+                    # Extract command without the leading '/' and without bot username
+                    command_text = text.split()[0][1:].split('@')[0] if text else None
+                    message_obj.command = [command_text] if command_text else None
                 
                 logger.info(f"✅ Created message object: {message_obj.text}")
+                logger.info(f"📋 Message attributes: chat.id={message_obj.chat.id}, from_user.id={message_obj.from_user.id}, command={getattr(message_obj, 'command', None)}")
                 
                 # Now dispatch through handlers
                 from pyrogram.handlers import MessageHandler
                 handlers_found = False
                 
+                logger.info(f"🔍 Checking {len(app.dispatcher.groups)} handler groups")
+                
                 for group in sorted(app.dispatcher.groups.keys()):
+                    logger.info(f"📦 Checking group {group} with {len(app.dispatcher.groups[group])} handlers")
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, MessageHandler):
+                            handler_name = handler.callback.__name__
                             try:
                                 # Check if filter passes
                                 filter_result = True
                                 if handler.filters:
                                     try:
                                         filter_result = await handler.filters(app, message_obj)
-                                        if filter_result:
-                                            logger.info(f"✅ Filter passed for handler: {handler.callback.__name__}")
+                                        logger.info(f"🔎 Handler '{handler_name}': filter={'PASSED' if filter_result else 'FAILED'}")
                                     except Exception as filter_error:
-                                        logger.error(f"Filter error for {handler.callback.__name__}: {filter_error}")
+                                        logger.error(f"Filter error for {handler_name}: {filter_error}", exc_info=True)
                                         continue
+                                else:
+                                    logger.info(f"🔎 Handler '{handler_name}': no filter (will execute)")
                                 
                                 if filter_result:
                                     handlers_found = True
-                                    logger.info(f"✅ Executing handler: {handler.callback.__name__}")
+                                    logger.info(f"✅ Executing handler: {handler_name}")
                                     await handler.callback(app, message_obj)
                                     break
                             except Exception as e:
-                                logger.error(f"❌ Handler error: {e}", exc_info=True)
+                                logger.error(f"❌ Handler error in {handler_name}: {e}", exc_info=True)
                     
                     if handlers_found:
                         break
                 
                 if not handlers_found:
                     logger.warning(f"⚠️ No handlers matched for message: {message_obj.text}")
+                    logger.warning(f"💡 Total handlers registered: {sum(len(handlers) for handlers in app.dispatcher.groups.values())}")
                     
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}", exc_info=True)
@@ -1229,6 +1259,7 @@ async def process_update_manually(update_dict):
             
             try:
                 from pyrogram import types
+                from pyrogram.enums import ChatType
                 
                 from_user_data = cb.get('from', {})
                 message_data = cb.get('message', {})
@@ -1248,7 +1279,7 @@ async def process_update_manually(update_dict):
                 chat_data = message_data.get('chat', {})
                 chat_obj = types.Chat(
                     id=chat_data.get('id'),
-                    type=types.ChatType.PRIVATE if chat_data.get('type') == 'private' else types.ChatType.GROUP,
+                    type=ChatType.PRIVATE if chat_data.get('type') == 'private' else ChatType.GROUP,
                     first_name=chat_data.get('first_name'),
                     last_name=chat_data.get('last_name'),
                     username=chat_data.get('username'),
