@@ -1127,84 +1127,220 @@ async def telegram_webhook(request):
 
 
 async def process_update_manually(update_dict):
-    """Manually process updates from webhook - CRITICAL FIX: MUST AWAIT _parse()"""
+    """Process updates from webhook using Pyrogram's internal methods"""
     try:
-        from pyrogram.handlers import MessageHandler, CallbackQueryHandler
-        from pyrogram import types
+        # Import Telegram raw types for conversion
+        from pyrogram import raw
+        import pyrogram
         
-        # Handle messages
+        logger.info(f"🔄 Processing update: {list(update_dict.keys())}")
+        
+        # Convert Telegram Bot API update to MTProto format
         if 'message' in update_dict:
-            msg_data = update_dict['message']
+            msg = update_dict['message']
+            logger.info(f"📩 Message from user {msg.get('from', {}).get('id')}: {msg.get('text', 'N/A')}")
             
-            logger.info(f"📋 Message data keys: {msg_data.keys()}")
-            logger.info(f"📋 Message text: {msg_data.get('text', 'N/A')}")
-            
+            # Use Pyrogram's raw API to create proper update object
             try:
-                # CRITICAL FIX: MUST AWAIT - _parse() is a coroutine
-                message = await types.Message._parse(app, msg_data, {}, None)
-                logger.info(f"✅ Message object created: ID={message.id}, User={message.from_user.id if message.from_user else 'N/A'}")
+                # Create a raw UpdateNewMessage
+                from_user = msg.get('from', {})
+                chat = msg.get('chat', {})
                 
-                # Get all handlers
-                handler_count = 0
+                # Build raw peer objects
+                peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
+                
+                # Build raw user object
+                user = raw.types.User(
+                    id=from_user.get('id', 0),
+                    is_self=False,
+                    contact=False,
+                    mutual_contact=False,
+                    deleted=False,
+                    bot=from_user.get('is_bot', False),
+                    bot_chat_history=False,
+                    bot_nochats=False,
+                    verified=False,
+                    restricted=False,
+                    min=False,
+                    bot_inline_geo=False,
+                    support=False,
+                    scam=False,
+                    apply_min_photo=False,
+                    fake=False,
+                    bot_attach_menu=False,
+                    premium=False,
+                    attach_menu_enabled=False,
+                    bot_can_edit=False,
+                    close_friend=False,
+                    stories_hidden=False,
+                    stories_unavailable=False,
+                    access_hash=0,
+                    first_name=from_user.get('first_name', ''),
+                    last_name=from_user.get('last_name'),
+                    username=from_user.get('username'),
+                    phone=None,
+                    photo=None,
+                    status=None,
+                    bot_info_version=None,
+                    restriction_reason=None,
+                    bot_inline_placeholder=None,
+                    lang_code=from_user.get('language_code'),
+                    emoji_status=None,
+                    usernames=None,
+                    stories_max_id=None,
+                    color=None,
+                    profile_color=None,
+                    bot_active_users=None
+                )
+                
+                # Build entities if present
+                entities = []
+                if 'entities' in msg:
+                    for ent in msg['entities']:
+                        if ent['type'] == 'bot_command':
+                            entities.append(raw.types.MessageEntityBotCommand(
+                                offset=ent['offset'],
+                                length=ent['length']
+                            ))
+                
+                # Build raw message
+                raw_message = raw.types.Message(
+                    id=msg.get('message_id', 0),
+                    peer_id=peer_user,
+                    from_id=peer_user,
+                    date=msg.get('date', 0),
+                    message=msg.get('text', ''),
+                    out=False,
+                    mentioned=False,
+                    media_unread=False,
+                    silent=False,
+                    post=False,
+                    from_scheduled=False,
+                    legacy=False,
+                    edit_hide=False,
+                    pinned=False,
+                    noforwards=False,
+                    entities=entities if entities else None
+                )
+                
+                # Parse to Pyrogram Message object
+                parsed_message = pyrogram.types.Message._parse(
+                    client=app,
+                    message=raw_message,
+                    users={from_user.get('id', 0): user},
+                    chats={},
+                    is_scheduled=False,
+                    replies=0
+                )
+                
+                logger.info(f"✅ Parsed message: {parsed_message.text}")
+                logger.info(f"✅ Parsed message: {parsed_message.text}")
+                
+                # Now dispatch through handlers
+                from pyrogram.handlers import MessageHandler
                 for group in sorted(app.dispatcher.groups.keys()):
-                    handlers = app.dispatcher.groups[group]
-                    logger.info(f"🔍 Checking group {group} with {len(handlers)} handlers")
-                    
-                    for handler in handlers:
+                    for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, MessageHandler):
-                            handler_count += 1
-                            handler_name = handler.callback.__name__
-                            logger.info(f"  └─ Checking handler: {handler_name}")
-                            
                             try:
-                                # Check if filters match
                                 if handler.filters:
-                                    filter_result = await handler.filters(app, message)
-                                    logger.info(f"     Filter result: {filter_result}")
-                                    
-                                    if filter_result:
-                                        logger.info(f"✅ EXECUTING handler: {handler_name}")
-                                        await handler.callback(app, message)
-                                        logger.info(f"✅ Handler {handler_name} completed")
+                                    if await handler.filters(app, parsed_message):
+                                        logger.info(f"✅ Executing handler: {handler.callback.__name__}")
+                                        await handler.callback(app, parsed_message)
                                         break
                                 else:
-                                    # No filters, always execute
-                                    logger.info(f"✅ EXECUTING handler (no filters): {handler_name}")
-                                    await handler.callback(app, message)
+                                    await handler.callback(app, parsed_message)
                                     break
                             except Exception as e:
-                                logger.error(f"❌ Handler {handler_name} error: {e}", exc_info=True)
-                
-                logger.info(f"📊 Total message handlers checked: {handler_count}")
+                                logger.error(f"❌ Handler error: {e}", exc_info=True)
                 
             except Exception as e:
-                logger.error(f"❌ Error creating Message object: {e}", exc_info=True)
+                logger.error(f"❌ Error processing message: {e}", exc_info=True)
         
         # Handle callback queries
         elif 'callback_query' in update_dict:
-            cb_data = update_dict['callback_query']
+            cb = update_dict['callback_query']
+            logger.info(f"🔘 Callback query from user {cb.get('from', {}).get('id')}: {cb.get('data')}")
             
             try:
-                # CRITICAL FIX: MUST AWAIT - _parse() is a coroutine
-                callback_query = await types.CallbackQuery._parse(app, cb_data, {})
-                logger.info(f"✅ CallbackQuery object created: {callback_query.data}")
+                from_user = cb.get('from', {})
+                message = cb.get('message', {})
                 
-                # Trigger callback query handlers
+                # Build raw user
+                user = raw.types.User(
+                    id=from_user.get('id', 0),
+                    is_self=False,
+                    contact=False,
+                    mutual_contact=False,
+                    deleted=False,
+                    bot=from_user.get('is_bot', False),
+                    bot_chat_history=False,
+                    bot_nochats=False,
+                    verified=False,
+                    restricted=False,
+                    min=False,
+                    bot_inline_geo=False,
+                    support=False,
+                    scam=False,
+                    apply_min_photo=False,
+                    fake=False,
+                    bot_attach_menu=False,
+                    premium=False,
+                    attach_menu_enabled=False,
+                    bot_can_edit=False,
+                    close_friend=False,
+                    stories_hidden=False,
+                    stories_unavailable=False,
+                    access_hash=0,
+                    first_name=from_user.get('first_name', ''),
+                    last_name=from_user.get('last_name'),
+                    username=from_user.get('username'),
+                    phone=None,
+                    photo=None,
+                    status=None,
+                    bot_info_version=None,
+                    restriction_reason=None,
+                    bot_inline_placeholder=None,
+                    lang_code=from_user.get('language_code'),
+                    emoji_status=None,
+                    usernames=None,
+                    stories_max_id=None,
+                    color=None,
+                    profile_color=None,
+                    bot_active_users=None
+                )
+                
+                # Build raw callback query
+                raw_callback = raw.types.UpdateBotCallbackQuery(
+                    query_id=int(cb.get('id', '0')),
+                    user_id=from_user.get('id', 0),
+                    peer=raw.types.PeerUser(user_id=from_user.get('id', 0)),
+                    msg_id=message.get('message_id', 0),
+                    chat_instance=int(cb.get('chat_instance', '0')),
+                    data=cb.get('data', '').encode()
+                )
+                
+                # Parse to Pyrogram CallbackQuery
+                parsed_callback = pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user})
+                
+                logger.info(f"✅ Parsed callback: {parsed_callback.data}")
+                
+                # Dispatch through handlers
+                from pyrogram.handlers import CallbackQueryHandler
                 for group in sorted(app.dispatcher.groups.keys()):
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, CallbackQueryHandler):
                             try:
-                                if handler.filters is None or await handler.filters(app, callback_query):
-                                    logger.info(f"✅ Triggering callback handler")
-                                    await handler.callback(app, callback_query)
+                                if handler.filters is None or await handler.filters(app, parsed_callback):
+                                    logger.info(f"✅ Executing callback handler")
+                                    await handler.callback(app, parsed_callback)
                                     break
                             except Exception as e:
                                 logger.error(f"❌ Callback handler error: {e}", exc_info=True)
             except Exception as e:
-                logger.error(f"❌ Error creating CallbackQuery object: {e}", exc_info=True)
+                logger.error(f"❌ Error processing callback: {e}", exc_info=True)
     
     except Exception as e:
-        logger.error(f"❌ Error processing update manually: {e}", exc_info=True)
+        logger.error(f"❌ Fatal error in process_update_manually: {e}", exc_info=True)
 
 
 async def health_check(request):
