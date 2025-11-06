@@ -12,6 +12,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
+import inspect # <-- FIX: Added missing import
 
 # Set up logging
 logging.basicConfig(
@@ -1132,7 +1133,6 @@ async def process_update_manually(update_dict):
         # Import Telegram raw types for conversion
         from pyrogram import raw
         import pyrogram
-        import inspect # <-- FIX: Import inspect for handling callback query arguments
         
         logger.info(f"🔄 Processing update: {list(update_dict.keys())}")
         
@@ -1172,9 +1172,9 @@ async def process_update_manually(update_dict):
                     premium=False,
                     attach_menu_enabled=False,
                     bot_can_edit=False,
-                    close_friend=False,
-                    stories_hidden=False,
-                    stories_unavailable=False,
+                    # close_friend=False, # <-- FIX: Removed unsupported argument
+                    # stories_hidden=False, # <-- FIX: Removed unsupported argument
+                    # stories_unavailable=False, # <-- FIX: Removed unsupported argument
                     access_hash=0,
                     first_name=from_user.get('first_name', ''),
                     last_name=from_user.get('last_name'),
