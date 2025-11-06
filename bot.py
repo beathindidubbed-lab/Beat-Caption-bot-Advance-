@@ -1237,7 +1237,7 @@ async def process_update_manually(update_dict):
                 )
                 
                 # Parse to Pyrogram Message object
-                parsed_message = pyrogram.types.Message._parse(
+                parsed_message = await pyrogram.types.Message._parse(
                     client=app,
                     message=raw_message,
                     users={from_user.get('id', 0): user},
@@ -1345,7 +1345,7 @@ async def process_update_manually(update_dict):
                 )
                 
                 # Parse to Pyrogram CallbackQuery
-                parsed_callback = pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user})
+                parsed_callback = await pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user})
                 
                 logger.info(f"✅ Parsed callback: {parsed_callback.data}")
                 
