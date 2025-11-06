@@ -12,7 +12,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
-import inspect # Added for callback query processing fix
+import inspect
 
 # Set up logging
 logging.basicConfig(
@@ -75,6 +75,9 @@ app = Client(
 )
 
 logger.info(f"🔧 Pyrogram Client initialized")
+
+# FIX: Initialize aiohttp web application globally
+web_app = web.Application()
 
 # Track users waiting for input and last messages
 waiting_for_input = {}
@@ -1449,7 +1452,7 @@ async def self_ping():
 
 
 async def start_web_server():
-    global web_app
+    # Note: web_app is initialized globally now
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
