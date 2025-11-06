@@ -492,7 +492,8 @@ async def start(client, message):
         "• Multi-quality support\n"
         "• Episode tracking (personal)\n"
         "• Your own channel settings\n"
-        "• Upload statistics\n\n"
+        "• Upload statistics\n"
+        "• This is your fixed bot code.\n\n"
         "🎯 <b>Get Started:</b>\n"
         "1. Set your target channel\n"
         "2. Configure caption template\n"
@@ -1245,7 +1246,7 @@ async def process_update_manually(update_dict):
                 )
                 
                 # Parse to Pyrogram Message object
-                parsed_message = pyrogram.types.Message._parse(
+                parsed_message = await pyrogram.types.Message._parse( # <-- Added await
                     client=app,
                     message=raw_message,
                     users={from_user.get('id', 0): user},
@@ -1300,7 +1301,7 @@ async def process_update_manually(update_dict):
                 )
                 
                 # Parse to Pyrogram CallbackQuery
-                parsed_callback = pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user})
+                parsed_callback = await pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user}) # <-- Added await
                 
                 logger.info(f"✅ Parsed callback: {parsed_callback.data}")
                 
@@ -1409,7 +1410,9 @@ async def self_ping():
 
 
 async def start_web_server():
-    global web_app
+    # Initialize the aiohttp application
+    web_app = web.Application()
+
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
