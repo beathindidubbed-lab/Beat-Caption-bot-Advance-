@@ -1141,136 +1141,54 @@ async def process_update_manually(update_dict):
             msg = update_dict['message']
             logger.info(f"📩 Message from user {msg.get('from', {}).get('id')}: {msg.get('text', 'N/A')}")
             
-            # Use Pyrogram's raw API to create proper update object
             try:
-                from_user = msg.get('from', {})
-                chat = msg.get('chat', {})
+                # Create a proper Pyrogram Message object from Bot API data
+                from pyrogram import types
                 
-                # Build raw peer objects
-                peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
+                from_user_data = msg.get('from', {})
+                chat_data = msg.get('chat', {})
                 
-                # Build peer chat for private messages
-                peer_chat = raw.types.PeerUser(user_id=from_user.get('id', 0))
-                
-                # Get valid parameters for User constructor
-                user_sig = inspect.signature(raw.types.User.__init__)
-                valid_params = set(user_sig.parameters.keys()) - {'self'}
-                
-                # Build user dict with all possible fields
-                user_dict = {
-                    'id': from_user.get('id', 0),
-                    'is_self': False,
-                    'contact': False,
-                    'mutual_contact': False,
-                    'deleted': False,
-                    'bot': from_user.get('is_bot', False),
-                    'bot_chat_history': False,
-                    'bot_nochats': False,
-                    'verified': False,
-                    'restricted': False,
-                    'min': False,
-                    'bot_inline_geo': False,
-                    'support': False,
-                    'scam': False,
-                    'apply_min_photo': False,
-                    'fake': False,
-                    'bot_attach_menu': False,
-                    'premium': False,
-                    'attach_menu_enabled': False,
-                    'bot_can_edit': False,
-                    'close_friend': False,
-                    'stories_hidden': False,
-                    'stories_unavailable': False,
-                    'contact_require_premium': False,
-                    'bot_business': False,
-                    'bot_has_main_app': False,
-                    'access_hash': 0,
-                    'first_name': from_user.get('first_name', ''),
-                    'last_name': from_user.get('last_name'),
-                    'username': from_user.get('username'),
-                    'phone': None,
-                    'photo': None,
-                    'status': None,
-                    'bot_info_version': None,
-                    'restriction_reason': [],
-                    'bot_inline_placeholder': None,
-                    'lang_code': from_user.get('language_code'),
-                    'emoji_status': None,
-                    'usernames': None,
-                    'stories_max_id': None,
-                    'color': None,
-                    'profile_color': None,
-                    'bot_active_users': None
-                }
-                
-                # Filter to only valid parameters
-                filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
-                
-                # Build raw user with only supported fields
-                user = raw.types.User(**filtered_user_dict)
-                
-                # Build entities if present
-                entities = []
-                if 'entities' in msg:
-                    for ent in msg['entities']:
-                        if ent['type'] == 'bot_command':
-                            entities.append(raw.types.MessageEntityBotCommand(
-                                offset=ent['offset'],
-                                length=ent['length']
-                            ))
-                
-                # Build raw message
-                raw_message = raw.types.Message(
-                    id=msg.get('message_id', 0),
-                    peer_id=peer_user,
-                    from_id=peer_user,
-                    date=msg.get('date', 0),
-                    message=msg.get('text', ''),
-                    out=False,
-                    mentioned=False,
-                    media_unread=False,
-                    silent=False,
-                    post=False,
-                    from_scheduled=False,
-                    legacy=False,
-                    edit_hide=False,
-                    pinned=False,
-                    noforwards=False,
-                    entities=entities if entities else None,
-                    reply_markup=None,
-                    via_bot_id=None,
-                    media=None,
-                    reply_to=None,
-                    fwd_from=None,
-                    post_author=None,
-                    grouped_id=None,
-                    reactions=None,
-                    restriction_reason=None,
-                    ttl_period=None
+                # Build User object
+                user_obj = types.User(
+                    id=from_user_data.get('id'),
+                    is_bot=from_user_data.get('is_bot', False),
+                    first_name=from_user_data.get('first_name', ''),
+                    last_name=from_user_data.get('last_name'),
+                    username=from_user_data.get('username'),
+                    language_code=from_user_data.get('language_code'),
+                    client=app
                 )
                 
-                # Parse to Pyrogram Message object
-                parsed_message = await pyrogram.types.Message._parse(
-                    client=app,
-                    message=raw_message,
-                    users={from_user.get('id', 0): user},
-                    chats={from_user.get('id', 0): user},
-                    is_scheduled=False,
-                    replies=0
+                # Build Chat object (for private chats, it's the same as user)
+                chat_obj = types.Chat(
+                    id=chat_data.get('id'),
+                    type=types.ChatType.PRIVATE if chat_data.get('type') == 'private' else types.ChatType.GROUP,
+                    first_name=chat_data.get('first_name'),
+                    last_name=chat_data.get('last_name'),
+                    username=chat_data.get('username'),
+                    client=app
                 )
                 
-                logger.info(f"✅ Parsed message: {parsed_message.text}")
+                # Build Message object
+                message_obj = types.Message(
+                    id=msg.get('message_id'),
+                    from_user=user_obj,
+                    date=msg.get('date'),
+                    chat=chat_obj,
+                    text=msg.get('text'),
+                    client=app
+                )
                 
-                # Ensure message has required attributes
-                if not hasattr(parsed_message, 'from_user') or parsed_message.from_user is None:
-                    parsed_message.from_user = pyrogram.types.User._parse(app, user)
+                # Add command info if it's a command
+                if msg.get('text', '').startswith('/'):
+                    message_obj.command = msg.get('text', '').split()[0][1:].split('@')[0]
                 
-                if not hasattr(parsed_message, 'chat') or parsed_message.chat is None:
-                    parsed_message.chat = pyrogram.types.Chat._parse(app, raw.types.PeerUser(user_id=from_user.get('id', 0)), {}, {})
+                logger.info(f"✅ Created message object: {message_obj.text}")
                 
                 # Now dispatch through handlers
                 from pyrogram.handlers import MessageHandler
                 handlers_found = False
+                
                 for group in sorted(app.dispatcher.groups.keys()):
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, MessageHandler):
@@ -1279,22 +1197,27 @@ async def process_update_manually(update_dict):
                                 filter_result = True
                                 if handler.filters:
                                     try:
-                                        filter_result = await handler.filters(app, parsed_message)
+                                        filter_result = await handler.filters(app, message_obj)
+                                        if filter_result:
+                                            logger.info(f"✅ Filter passed for handler: {handler.callback.__name__}")
                                     except Exception as filter_error:
-                                        logger.error(f"Filter error: {filter_error}")
+                                        logger.error(f"Filter error for {handler.callback.__name__}: {filter_error}")
                                         continue
                                 
                                 if filter_result:
                                     handlers_found = True
                                     logger.info(f"✅ Executing handler: {handler.callback.__name__}")
-                                    await handler.callback(app, parsed_message)
+                                    await handler.callback(app, message_obj)
                                     break
                             except Exception as e:
                                 logger.error(f"❌ Handler error: {e}", exc_info=True)
+                    
+                    if handlers_found:
+                        break
                 
                 if not handlers_found:
-                    logger.warning(f"⚠️ No handlers matched for message: {parsed_message.text}")
-                
+                    logger.warning(f"⚠️ No handlers matched for message: {message_obj.text}")
+                    
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}", exc_info=True)
         
@@ -1304,80 +1227,54 @@ async def process_update_manually(update_dict):
             logger.info(f"🔘 Callback query from user {cb.get('from', {}).get('id')}: {cb.get('data')}")
             
             try:
-                from_user = cb.get('from', {})
-                message = cb.get('message', {})
+                from pyrogram import types
                 
-                # Get valid parameters for User constructor
-                user_sig = inspect.signature(raw.types.User.__init__)
-                valid_params = set(user_sig.parameters.keys()) - {'self'}
+                from_user_data = cb.get('from', {})
+                message_data = cb.get('message', {})
                 
-                # Build user dict with all possible fields
-                user_dict = {
-                    'id': from_user.get('id', 0),
-                    'is_self': False,
-                    'contact': False,
-                    'mutual_contact': False,
-                    'deleted': False,
-                    'bot': from_user.get('is_bot', False),
-                    'bot_chat_history': False,
-                    'bot_nochats': False,
-                    'verified': False,
-                    'restricted': False,
-                    'min': False,
-                    'bot_inline_geo': False,
-                    'support': False,
-                    'scam': False,
-                    'apply_min_photo': False,
-                    'fake': False,
-                    'bot_attach_menu': False,
-                    'premium': False,
-                    'attach_menu_enabled': False,
-                    'bot_can_edit': False,
-                    'close_friend': False,
-                    'stories_hidden': False,
-                    'stories_unavailable': False,
-                    'contact_require_premium': False,
-                    'bot_business': False,
-                    'bot_has_main_app': False,
-                    'access_hash': 0,
-                    'first_name': from_user.get('first_name', ''),
-                    'last_name': from_user.get('last_name'),
-                    'username': from_user.get('username'),
-                    'phone': None,
-                    'photo': None,
-                    'status': None,
-                    'bot_info_version': None,
-                    'restriction_reason': [],
-                    'bot_inline_placeholder': None,
-                    'lang_code': from_user.get('language_code'),
-                    'emoji_status': None,
-                    'usernames': None,
-                    'stories_max_id': None,
-                    'color': None,
-                    'profile_color': None,
-                    'bot_active_users': None
-                }
-                
-                # Filter to only valid parameters
-                filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
-                
-                # Build raw user with only supported fields
-                user = raw.types.User(**filtered_user_dict)
-                
-                # Build raw callback query
-                raw_callback = raw.types.UpdateBotCallbackQuery(
-                    query_id=int(cb.get('id', '0')),
-                    user_id=from_user.get('id', 0),
-                    peer=raw.types.PeerUser(user_id=from_user.get('id', 0)),
-                    msg_id=message.get('message_id', 0),
-                    chat_instance=int(cb.get('chat_instance', '0')),
-                    data=cb.get('data', '').encode()
+                # Build User object
+                user_obj = types.User(
+                    id=from_user_data.get('id'),
+                    is_bot=from_user_data.get('is_bot', False),
+                    first_name=from_user_data.get('first_name', ''),
+                    last_name=from_user_data.get('last_name'),
+                    username=from_user_data.get('username'),
+                    language_code=from_user_data.get('language_code'),
+                    client=app
                 )
                 
-                # Parse to Pyrogram CallbackQuery
-                parsed_callback = await pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user})
+                # Build Chat object
+                chat_data = message_data.get('chat', {})
+                chat_obj = types.Chat(
+                    id=chat_data.get('id'),
+                    type=types.ChatType.PRIVATE if chat_data.get('type') == 'private' else types.ChatType.GROUP,
+                    first_name=chat_data.get('first_name'),
+                    last_name=chat_data.get('last_name'),
+                    username=chat_data.get('username'),
+                    client=app
+                )
                 
-                logger.info(f"✅ Parsed callback: {parsed_callback.data}")
+                # Build Message object
+                message_obj = types.Message(
+                    id=message_data.get('message_id'),
+                    from_user=user_obj,
+                    date=message_data.get('date'),
+                    chat=chat_obj,
+                    text=message_data.get('text'),
+                    client=app
+                )
+                
+                # Build CallbackQuery object
+                callback_obj = types.CallbackQuery(
+                    id=cb.get('id'),
+                    from_user=user_obj,
+                    message=message_obj,
+                    data=cb.get('data'),
+                    chat_instance=cb.get('chat_instance'),
+                    client=app
+                )
+                
+                logger.info(f"✅ Created callback object: {callback_obj.data}")
                 
                 # Dispatch through handlers
                 from pyrogram.handlers import CallbackQueryHandler
@@ -1385,12 +1282,13 @@ async def process_update_manually(update_dict):
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, CallbackQueryHandler):
                             try:
-                                if handler.filters is None or await handler.filters(app, parsed_callback):
+                                if handler.filters is None or await handler.filters(app, callback_obj):
                                     logger.info(f"✅ Executing callback handler")
-                                    await handler.callback(app, parsed_callback)
+                                    await handler.callback(app, callback_obj)
                                     break
                             except Exception as e:
                                 logger.error(f"❌ Callback handler error: {e}", exc_info=True)
+                                
             except Exception as e:
                 logger.error(f"❌ Error processing callback: {e}", exc_info=True)
     
