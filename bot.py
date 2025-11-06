@@ -388,7 +388,7 @@ async def delete_last_message(client, chat_id):
 
 def get_menu_markup():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Preview Caption", callback_data="preview")],
+        [InlineKeyboardButton("📄 Preview Caption", callback_data="preview")],
         [InlineKeyboardButton("✏️ Set Caption", callback_data="set_caption")],
         [
             InlineKeyboardButton("📺 Set Season", callback_data="set_season"),
@@ -630,7 +630,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             .replace("{quality}", quality)
 
         sent = await callback_query.message.reply(
-            f"📝 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
+            f"📄 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
             f"<b>Current Settings:</b>\n"
             f"Season: {settings['season']}\n"
             f"Episode: {settings['episode']}\n"
@@ -1117,33 +1117,8 @@ async def telegram_webhook(request):
         
         logger.info(f"📨 Webhook received update ID: {update_id}")
         
-        # Convert dict to Pyrogram objects and process
-        from pyrogram import types
-        
-        # Handle regular messages
-        if 'message' in update_dict:
-            msg_dict = update_dict['message']
-            logger.info(f"   └─ Processing message from user {msg_dict.get('from', {}).get('id')}")
-            
-            # Create a raw update for Pyrogram to process
-            import pyrogram.raw.types as raw_types
-            import pyrogram.raw.functions as raw_functions
-            
-            # Put the raw update in the queue for processing
-            update_obj = raw_types.UpdateNewMessage(
-                message=msg_dict,
-                pts=0,
-                pts_count=0
-            )
-            
-            # Trigger manual processing
-            asyncio.create_task(process_update_manually(update_dict))
-        
-        # Handle callback queries
-        elif 'callback_query' in update_dict:
-            cb_dict = update_dict['callback_query']
-            logger.info(f"   └─ Processing callback from user {cb_dict.get('from', {}).get('id')}")
-            asyncio.create_task(process_update_manually(update_dict))
+        # Process update asynchronously
+        asyncio.create_task(process_update_manually(update_dict))
         
         return web.Response(status=200, text="OK")
     except Exception as e:
@@ -1152,7 +1127,7 @@ async def telegram_webhook(request):
 
 
 async def process_update_manually(update_dict):
-    """Manually process updates from webhook"""
+    """Manually process updates from webhook - CRITICAL FIX: MUST AWAIT _parse()"""
     try:
         from pyrogram.handlers import MessageHandler, CallbackQueryHandler
         from pyrogram import types
@@ -1161,12 +1136,12 @@ async def process_update_manually(update_dict):
         if 'message' in update_dict:
             msg_data = update_dict['message']
             
-            logger.info(f"📝 Message data keys: {msg_data.keys()}")
-            logger.info(f"📝 Message text: {msg_data.get('text', 'N/A')}")
+            logger.info(f"📋 Message data keys: {msg_data.keys()}")
+            logger.info(f"📋 Message text: {msg_data.get('text', 'N/A')}")
             
             try:
-                # Create Message object using Pyrogram's internal parser
-                message = types.Message._parse(app, msg_data, {}, None)
+                # CRITICAL FIX: MUST AWAIT - _parse() is a coroutine
+                message = await types.Message._parse(app, msg_data, {}, None)
                 logger.info(f"✅ Message object created: ID={message.id}, User={message.from_user.id if message.from_user else 'N/A'}")
                 
                 # Get all handlers
@@ -1210,8 +1185,8 @@ async def process_update_manually(update_dict):
             cb_data = update_dict['callback_query']
             
             try:
-                # Create CallbackQuery object
-                callback_query = types.CallbackQuery._parse(app, cb_data, {})
+                # CRITICAL FIX: MUST AWAIT - _parse() is a coroutine
+                callback_query = await types.CallbackQuery._parse(app, cb_data, {})
                 logger.info(f"✅ CallbackQuery object created: {callback_query.data}")
                 
                 # Trigger callback query handlers
@@ -1318,7 +1293,7 @@ async def self_ping():
 
 
 async def start_web_server():
-    global web_app # FIX: Add global declaration for web_app
+    global web_app
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
