@@ -1149,6 +1149,9 @@ async def process_update_manually(update_dict):
                 # Build raw peer objects
                 peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
                 
+                # Build peer chat for private messages
+                peer_chat = raw.types.PeerUser(user_id=from_user.get('id', 0))
+                
                 # Get valid parameters for User constructor
                 user_sig = inspect.signature(raw.types.User.__init__)
                 valid_params = set(user_sig.parameters.keys()) - {'self'}
@@ -1233,7 +1236,17 @@ async def process_update_manually(update_dict):
                     edit_hide=False,
                     pinned=False,
                     noforwards=False,
-                    entities=entities if entities else None
+                    entities=entities if entities else None,
+                    reply_markup=None,
+                    via_bot_id=None,
+                    media=None,
+                    reply_to=None,
+                    fwd_from=None,
+                    post_author=None,
+                    grouped_id=None,
+                    reactions=None,
+                    restriction_reason=None,
+                    ttl_period=None
                 )
                 
                 # Parse to Pyrogram Message object
@@ -1241,29 +1254,46 @@ async def process_update_manually(update_dict):
                     client=app,
                     message=raw_message,
                     users={from_user.get('id', 0): user},
-                    chats={},
+                    chats={from_user.get('id', 0): user},
                     is_scheduled=False,
                     replies=0
                 )
                 
                 logger.info(f"✅ Parsed message: {parsed_message.text}")
                 
+                # Ensure message has required attributes
+                if not hasattr(parsed_message, 'from_user') or parsed_message.from_user is None:
+                    parsed_message.from_user = pyrogram.types.User._parse(app, user)
+                
+                if not hasattr(parsed_message, 'chat') or parsed_message.chat is None:
+                    parsed_message.chat = pyrogram.types.Chat._parse(app, raw.types.PeerUser(user_id=from_user.get('id', 0)), {}, {})
+                
                 # Now dispatch through handlers
                 from pyrogram.handlers import MessageHandler
+                handlers_found = False
                 for group in sorted(app.dispatcher.groups.keys()):
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, MessageHandler):
                             try:
+                                # Check if filter passes
+                                filter_result = True
                                 if handler.filters:
-                                    if await handler.filters(app, parsed_message):
-                                        logger.info(f"✅ Executing handler: {handler.callback.__name__}")
-                                        await handler.callback(app, parsed_message)
-                                        break
-                                else:
+                                    try:
+                                        filter_result = await handler.filters(app, parsed_message)
+                                    except Exception as filter_error:
+                                        logger.error(f"Filter error: {filter_error}")
+                                        continue
+                                
+                                if filter_result:
+                                    handlers_found = True
+                                    logger.info(f"✅ Executing handler: {handler.callback.__name__}")
                                     await handler.callback(app, parsed_message)
                                     break
                             except Exception as e:
                                 logger.error(f"❌ Handler error: {e}", exc_info=True)
+                
+                if not handlers_found:
+                    logger.warning(f"⚠️ No handlers matched for message: {parsed_message.text}")
                 
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}", exc_info=True)
