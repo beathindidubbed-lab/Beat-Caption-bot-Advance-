@@ -12,7 +12,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
-import inspect # Added for webhook logic
+import inspect
 
 # Set up logging
 logging.basicConfig(
@@ -44,8 +44,8 @@ ADMIN_IDS = [
 if not ADMIN_IDS:
     ADMIN_IDS = [123456789]  # Replace with your actual Telegram user ID
 
-logger.info(f"🔧 Admin IDs configured: {ADMIN_IDS}")
-logger.info(f"🔧 Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not configured (using polling)'}")
+logger.info(f"📧 Admin IDs configured: {ADMIN_IDS}")
+logger.info(f"📧 Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not configured (using polling)'}")
 
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
@@ -66,7 +66,7 @@ app = Client(
     in_memory=True
 )
 
-logger.info(f"🔧 Pyrogram Client initialized")
+logger.info(f"📧 Pyrogram Client initialized")
 
 # Track users waiting for input and last messages
 waiting_for_input = {}
@@ -1143,56 +1143,68 @@ async def process_update_manually(update_dict):
             
             # Use Pyrogram's raw API to create proper update object
             try:
-                # Create a raw UpdateNewMessage
                 from_user = msg.get('from', {})
                 chat = msg.get('chat', {})
                 
                 # Build raw peer objects
                 peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
                 
-                # Build raw user object
-                user = raw.types.User(
-                    id=from_user.get('id', 0),
-                    is_self=False,
-                    contact=False,
-                    mutual_contact=False,
-                    deleted=False,
-                    bot=from_user.get('is_bot', False),
-                    bot_chat_history=False,
-                    bot_nochats=False,
-                    verified=False,
-                    restricted=False,
-                    min=False,
-                    bot_inline_geo=False,
-                    support=False,
-                    scam=False,
-                    apply_min_photo=False,
-                    fake=False,
-                    bot_attach_menu=False,
-                    premium=False,
-                    attach_menu_enabled=False,
-                    bot_can_edit=False,
-                    close_friend=False,
-                    stories_hidden=False,
-                    stories_unavailable=False,
-                    access_hash=0,
-                    first_name=from_user.get('first_name', ''),
-                    last_name=from_user.get('last_name'),
-                    username=from_user.get('username'),
-                    phone=None,
-                    photo=None,
-                    status=None,
-                    bot_info_version=None,
-                    restriction_reason=[], # <-- FIXED: Changed None to []
-                    bot_inline_placeholder=None,
-                    lang_code=from_user.get('language_code'),
-                    emoji_status=None,
-                    usernames=None,
-                    stories_max_id=None,
-                    color=None,
-                    profile_color=None,
-                    bot_active_users=None
-                )
+                # Get valid parameters for User constructor
+                user_sig = inspect.signature(raw.types.User.__init__)
+                valid_params = set(user_sig.parameters.keys()) - {'self'}
+                
+                # Build user dict with all possible fields
+                user_dict = {
+                    'id': from_user.get('id', 0),
+                    'is_self': False,
+                    'contact': False,
+                    'mutual_contact': False,
+                    'deleted': False,
+                    'bot': from_user.get('is_bot', False),
+                    'bot_chat_history': False,
+                    'bot_nochats': False,
+                    'verified': False,
+                    'restricted': False,
+                    'min': False,
+                    'bot_inline_geo': False,
+                    'support': False,
+                    'scam': False,
+                    'apply_min_photo': False,
+                    'fake': False,
+                    'bot_attach_menu': False,
+                    'premium': False,
+                    'attach_menu_enabled': False,
+                    'bot_can_edit': False,
+                    'close_friend': False,
+                    'stories_hidden': False,
+                    'stories_unavailable': False,
+                    'contact_require_premium': False,
+                    'bot_business': False,
+                    'bot_has_main_app': False,
+                    'access_hash': 0,
+                    'first_name': from_user.get('first_name', ''),
+                    'last_name': from_user.get('last_name'),
+                    'username': from_user.get('username'),
+                    'phone': None,
+                    'photo': None,
+                    'status': None,
+                    'bot_info_version': None,
+                    'restriction_reason': [],
+                    'bot_inline_placeholder': None,
+                    'lang_code': from_user.get('language_code'),
+                    'emoji_status': None,
+                    'usernames': None,
+                    'stories_max_id': None,
+                    'color': None,
+                    'profile_color': None,
+                    'bot_active_users': None
+                }
+                
+                # Filter to only valid parameters
+                filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
+                
+                # Build raw user with only supported fields
+                user = raw.types.User(**filtered_user_dict)
                 
                 # Build entities if present
                 entities = []
@@ -1234,7 +1246,6 @@ async def process_update_manually(update_dict):
                     replies=0
                 )
                 
-                logger.info(f"✅ Parsed message: {parsed_message.text}")
                 logger.info(f"✅ Parsed message: {parsed_message.text}")
                 
                 # Now dispatch through handlers
@@ -1306,7 +1317,7 @@ async def process_update_manually(update_dict):
                     'photo': None,
                     'status': None,
                     'bot_info_version': None,
-                    'restriction_reason': [], # <-- FIXED: Changed None to []
+                    'restriction_reason': [],
                     'bot_inline_placeholder': None,
                     'lang_code': from_user.get('language_code'),
                     'emoji_status': None,
