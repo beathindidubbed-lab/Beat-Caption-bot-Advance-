@@ -12,7 +12,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
-import inspect # <-- FIX: Added missing import
+import inspect # <-- FIX 1: Import inspect
 
 # Set up logging
 logging.basicConfig(
@@ -1150,49 +1150,63 @@ async def process_update_manually(update_dict):
                 # Build raw peer objects
                 peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
                 
-                # Build raw user object
-                user = raw.types.User(
-                    id=from_user.get('id', 0),
-                    is_self=False,
-                    contact=False,
-                    mutual_contact=False,
-                    deleted=False,
-                    bot=from_user.get('is_bot', False),
-                    bot_chat_history=False,
-                    bot_nochats=False,
-                    verified=False,
-                    restricted=False,
-                    min=False,
-                    bot_inline_geo=False,
-                    support=False,
-                    scam=False,
-                    apply_min_photo=False,
-                    fake=False,
-                    bot_attach_menu=False,
-                    premium=False,
-                    attach_menu_enabled=False,
-                    bot_can_edit=False,
-                    # close_friend=False, # <-- FIX: Removed unsupported argument
-                    # stories_hidden=False, # <-- FIX: Removed unsupported argument
-                    # stories_unavailable=False, # <-- FIX: Removed unsupported argument
-                    access_hash=0,
-                    first_name=from_user.get('first_name', ''),
-                    last_name=from_user.get('last_name'),
-                    username=from_user.get('username'),
-                    phone=None,
-                    photo=None,
-                    status=None,
-                    bot_info_version=None,
-                    restriction_reason=None,
-                    bot_inline_placeholder=None,
-                    lang_code=from_user.get('language_code'),
-                    emoji_status=None,
-                    usernames=None,
-                    stories_max_id=None,
-                    color=None,
-                    profile_color=None,
-                    bot_active_users=None
-                )
+                # FIX 2: Dynamic User object construction to avoid TypeError
+                # Get valid parameters for User constructor to avoid TypeError in case of Pyrogram version mismatch
+                user_sig = inspect.signature(raw.types.User.__init__)
+                valid_params = set(user_sig.parameters.keys()) - {'self'}
+                
+                # Build a dictionary with all possible user fields
+                user_dict = {
+                    'id': from_user.get('id', 0),
+                    'is_self': False,
+                    'contact': False,
+                    'mutual_contact': False,
+                    'deleted': False,
+                    'bot': from_user.get('is_bot', False),
+                    'bot_chat_history': False,
+                    'bot_nochats': False,
+                    'verified': False,
+                    'restricted': False,
+                    'min': False,
+                    'bot_inline_geo': False,
+                    'support': False,
+                    'scam': False,
+                    'apply_min_photo': False,
+                    'fake': False,
+                    'bot_attach_menu': False,
+                    'premium': False,
+                    'attach_menu_enabled': False,
+                    'bot_can_edit': False,
+                    'close_friend': False,
+                    'stories_hidden': False,
+                    'stories_unavailable': False,
+                    'contact_require_premium': False,
+                    'bot_business': False,
+                    'bot_has_main_app': False,
+                    'access_hash': 0,
+                    'first_name': from_user.get('first_name', ''),
+                    'last_name': from_user.get('last_name'),
+                    'username': from_user.get('username'),
+                    'phone': None,
+                    'photo': None,
+                    'status': None,
+                    'bot_info_version': None,
+                    'restriction_reason': None,
+                    'bot_inline_placeholder': None,
+                    'lang_code': from_user.get('language_code'),
+                    'emoji_status': None,
+                    'usernames': None,
+                    'stories_max_id': None,
+                    'color': None,
+                    'profile_color': None,
+                    'bot_active_users': None
+                }
+
+                # Filter to only valid parameters
+                filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
+
+                # Build raw user with only supported fields
+                user = raw.types.User(**filtered_user_dict) 
                 
                 # Build entities if present
                 entities = []
