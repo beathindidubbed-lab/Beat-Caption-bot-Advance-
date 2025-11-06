@@ -12,6 +12,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
+import inspect # <-- CRITICAL FIX: Added inspect for dynamic field detection
 
 # Set up logging
 logging.basicConfig(
@@ -71,9 +72,6 @@ logger.info(f"🔧 Pyrogram Client initialized")
 waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
-
-# Web server
-web_app = web.Application()
 
 
 def get_user_lock(user_id):
@@ -1132,9 +1130,73 @@ async def process_update_manually(update_dict):
         # Import Telegram raw types for conversion
         from pyrogram import raw
         import pyrogram
+        # Note: 'import inspect' is now a global import for cleaner code.
         
         logger.info(f"🔄 Processing update: {list(update_dict.keys())}")
         
+        # --- Helper for Dynamic User Object Construction ---
+        def create_raw_user(from_user: dict):
+            # Get valid parameters from the actual User class constructor
+            user_sig = inspect.signature(raw.types.User.__init__)
+            # Exclude 'self' and any unexpected arguments like 'kwargs' if they appear
+            valid_params = set(user_sig.parameters.keys()) - {'self', 'kwargs'} 
+            
+            # Build a dictionary with ALL possible Bot API fields (Current Pyrogram 2.0+)
+            user_dict = {
+                'id': from_user.get('id', 0),
+                'is_self': False,
+                'contact': False,
+                'mutual_contact': False,
+                'deleted': False,
+                'bot': from_user.get('is_bot', False),
+                'bot_chat_history': False,
+                'bot_nochats': False,
+                'verified': False,
+                'restricted': False,
+                'min': False,
+                'bot_inline_geo': False,
+                'support': False,
+                'scam': False,
+                'apply_min_photo': False,
+                'fake': False,
+                # Fields that might cause errors in older 2.0.x versions:
+                'bot_attach_menu': False,
+                'premium': False,
+                'attach_menu_enabled': False,
+                'bot_can_edit': False,
+                'close_friend': False, # This field caused the error
+                'stories_hidden': False,
+                'stories_unavailable': False,
+                'contact_require_premium': False,
+                'bot_business': False,
+                'bot_has_main_app': False,
+                # Essential fields:
+                'access_hash': 0,
+                'first_name': from_user.get('first_name', ''),
+                'last_name': from_user.get('last_name'),
+                'username': from_user.get('username'),
+                'phone': None,
+                'photo': None,
+                'status': None,
+                'bot_info_version': None,
+                'restriction_reason': None,
+                'bot_inline_placeholder': None,
+                'lang_code': from_user.get('language_code'),
+                'emoji_status': None,
+                'usernames': None,
+                'stories_max_id': None,
+                'color': None,
+                'profile_color': None,
+                'bot_active_users': None
+            }
+            
+            # Filter to only valid parameters for the installed Pyrogram version
+            filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
+            
+            # Build raw user with only supported fields
+            return raw.types.User(**filtered_user_dict)
+        # --- End Helper ---
+
         # Convert Telegram Bot API update to MTProto format
         if 'message' in update_dict:
             msg = update_dict['message']
@@ -1149,49 +1211,8 @@ async def process_update_manually(update_dict):
                 # Build raw peer objects
                 peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
                 
-                # Build raw user object
-                user = raw.types.User(
-                    id=from_user.get('id', 0),
-                    is_self=False,
-                    contact=False,
-                    mutual_contact=False,
-                    deleted=False,
-                    bot=from_user.get('is_bot', False),
-                    bot_chat_history=False,
-                    bot_nochats=False,
-                    verified=False,
-                    restricted=False,
-                    min=False,
-                    bot_inline_geo=False,
-                    support=False,
-                    scam=False,
-                    apply_min_photo=False,
-                    fake=False,
-                    bot_attach_menu=False,
-                    premium=False,
-                    attach_menu_enabled=False,
-                    bot_can_edit=False,
-                    close_friend=False,
-                    stories_hidden=False,
-                    stories_unavailable=False,
-                    access_hash=0,
-                    first_name=from_user.get('first_name', ''),
-                    last_name=from_user.get('last_name'),
-                    username=from_user.get('username'),
-                    phone=None,
-                    photo=None,
-                    status=None,
-                    bot_info_version=None,
-                    restriction_reason=None,
-                    bot_inline_placeholder=None,
-                    lang_code=from_user.get('language_code'),
-                    emoji_status=None,
-                    usernames=None,
-                    stories_max_id=None,
-                    color=None,
-                    profile_color=None,
-                    bot_active_users=None
-                )
+                # CRITICAL FIX APPLIED HERE: Use dynamic helper
+                user = create_raw_user(from_user) 
                 
                 # Build entities if present
                 entities = []
@@ -1265,62 +1286,8 @@ async def process_update_manually(update_dict):
                 from_user = cb.get('from', {})
                 message = cb.get('message', {})
                 
-                # Get valid parameters for User constructor
-                user_sig = inspect.signature(raw.types.User.__init__)
-                valid_params = set(user_sig.parameters.keys()) - {'self'}
-                
-                # Build user dict with all possible fields
-                user_dict = {
-                    'id': from_user.get('id', 0),
-                    'is_self': False,
-                    'contact': False,
-                    'mutual_contact': False,
-                    'deleted': False,
-                    'bot': from_user.get('is_bot', False),
-                    'bot_chat_history': False,
-                    'bot_nochats': False,
-                    'verified': False,
-                    'restricted': False,
-                    'min': False,
-                    'bot_inline_geo': False,
-                    'support': False,
-                    'scam': False,
-                    'apply_min_photo': False,
-                    'fake': False,
-                    'bot_attach_menu': False,
-                    'premium': False,
-                    'attach_menu_enabled': False,
-                    'bot_can_edit': False,
-                    'close_friend': False,
-                    'stories_hidden': False,
-                    'stories_unavailable': False,
-                    'contact_require_premium': False,
-                    'bot_business': False,
-                    'bot_has_main_app': False,
-                    'access_hash': 0,
-                    'first_name': from_user.get('first_name', ''),
-                    'last_name': from_user.get('last_name'),
-                    'username': from_user.get('username'),
-                    'phone': None,
-                    'photo': None,
-                    'status': None,
-                    'bot_info_version': None,
-                    'restriction_reason': None,
-                    'bot_inline_placeholder': None,
-                    'lang_code': from_user.get('language_code'),
-                    'emoji_status': None,
-                    'usernames': None,
-                    'stories_max_id': None,
-                    'color': None,
-                    'profile_color': None,
-                    'bot_active_users': None
-                }
-                
-                # Filter to only valid parameters
-                filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
-                
-                # Build raw user with only supported fields
-                user = raw.types.User(**filtered_user_dict)
+                # CRITICAL FIX APPLIED HERE: Use dynamic helper
+                user = create_raw_user(from_user) 
                 
                 # Build raw callback query
                 raw_callback = raw.types.UpdateBotCallbackQuery(
