@@ -2,7 +2,7 @@ import sys
 import json
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message, Document
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from pathlib import Path
 import asyncio
 import os
@@ -12,10 +12,6 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
-import time
-import io
-import inspect
-import traceback
 
 # Set up logging
 logging.basicConfig(
@@ -52,12 +48,8 @@ logger.info(f"🔧 Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not configured
 
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
-
-# NEW: Extended caption template with new placeholders
 DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
                   "Season {season} - Episode {episode} ({total_episode}) - {quality}\n"
-                  "<b>Uploader:</b> <a href='tg://user?id={user_id}'>{first_name}</a> (@{username})\n"
-                  "<b>Channel:</b> <code>{chat_title}</code> (ID: <code>{chat_id}</code>)\n"
                   "<blockquote>Don't miss this episode!</blockquote>")
 
 # Database pool
@@ -75,77 +67,20 @@ app = Client(
 
 logger.info(f"🔧 Pyrogram Client initialized")
 
-# Trackers for features
+# Track users waiting for input and last messages
 waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
-media_group_cache = {}
-last_upload_time = {}
 
-# Web server - Initialized globally for access in start_web_server
+# Web server
 web_app = web.Application()
-
-# NEW: Localization Framework
-def get_string(key, lang="en"):
-    """Fetches a string for localization. Default is English (en)."""
-    STRINGS = {
-        "en": {
-            "rate_limit": "⚠️ <b>Rate Limit:</b> Please wait **{cooldown} seconds** between uploads. Last upload was **{elapsed:.1f} seconds** ago.",
-            "menu_welcome": "👋 <b>Welcome Back!</b>\n\nUse the buttons below.",
-            "export_success": "✅ <b>Settings Exported!</b>\n\nHere is your JSON file. Save it for backup. Only the *uploader* of this file can use it for import.",
-            "export_fail": "❌ <b>Export Failed!</b>\n\nCould not fetch settings.",
-            "import_prompt": "⬆️ <b>Import Settings</b>\n\nSend me the **JSON file** containing your settings data (from `/export`).",
-            "import_invalid": "❌ <b>Import Failed!</b>\n\nInvalid file format, missing required keys, or User ID mismatch (expected: <code>{expected_id}</code>, found: <code>{found_id}</code>). Please upload the original JSON file.",
-            "import_success": "✅ <b>Settings Imported!</b>\n\nYour progress has been restored.",
-            "placeholder_help": "\n\n<b>Available Placeholders:</b>\n"
-                                "• Episode: <code>{season}</code>, <code>{episode}</code>, <code>{total_episode}</code>, <code>{quality}</code>\n"
-                                "• Uploader: <code>{username}</code>, <code>{first_name}</code>, <code>{user_id}</code>\n"
-                                "• Channel: <code>{chat_id}</code>, <code>{chat_title}</code>",
-            "error_channel_not_set": "❌ <b>No target channel set!</b>\n\nPlease set your target channel first.",
-            "upload_success": "✅ <b>Video processed!</b>\n\n"
-                              "📺 Season: {season}\n"
-                              "🎬 Episode: {episode}\n"
-                              "🎥 Quality: {quality}\n"
-                              "🔢 Next Count: {next_count}/{total_qualities}",
-            "upload_error_not_admin": "❌ <b>Error forwarding!</b>\n\n"
-                                      "Make sure:\n"
-                                      "• Bot is admin in channel\n"
-                                      "• Channel ID is correct: <code>{target_chat_id}</code>",
-            "admin_only": "❌ <b>Access Denied!</b>\n\nYou don't have permission to use this command."
-        }
-    }
-    return STRINGS.get(lang, STRINGS['en']).get(key, key) # Fallback to key itself
 
 
 def get_user_lock(user_id):
-    """Get or create a lock for a specific user to prevent race conditions in batch processing"""
+    """Get or create a lock for a specific user"""
     if user_id not in user_locks:
         user_locks[user_id] = asyncio.Lock()
     return user_locks[user_id]
-
-
-async def get_channel_info(chat_id):
-    """Retrieve channel info by chat_id (for placeholders)"""
-    if db_pool:
-        try:
-            async with db_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    # Select the latest info for the chat_id, regardless of the user who set it
-                    await cur.execute(
-                        'SELECT username, title, chat_id FROM channel_info WHERE chat_id = %s ORDER BY added_at DESC LIMIT 1',
-                        (chat_id,)
-                    )
-                    row = await cur.fetchone()
-                    if row:
-                        return {
-                            'username': row[0] or 'N/A',
-                            'title': row[1] or 'Private Channel',
-                            'chat_id': row[2]
-                        }
-        except Exception as e:
-            logger.error(f"Error retrieving channel info: {e}")
-    # Default fallback
-    return {'username': 'N/A', 'title': 'Private Channel', 'chat_id': chat_id}
 
 
 async def init_db():
@@ -236,19 +171,6 @@ async def init_db():
 
 async def get_user_settings(user_id, username=None, first_name=None):
     """Load settings for a specific user"""
-    default_settings = {
-        'user_id': user_id,
-        'season': 1,
-        'episode': 1,
-        'total_episode': 1,
-        'video_count': 0,
-        'selected_qualities': ["480p", "720p", "1080p"],
-        'base_caption': DEFAULT_CAPTION,
-        'target_chat_id': None,
-        'username': username,
-        'first_name': first_name
-    }
-    
     if db_pool:
         try:
             async with db_pool.connection() as conn:
@@ -259,21 +181,28 @@ async def get_user_settings(user_id, username=None, first_name=None):
                     if row:
                         colnames = [desc[0] for desc in cur.description]
                         row_dict = dict(zip(colnames, row))
-                        
-                        settings = {
+                        return {
                             'user_id': row_dict['user_id'],
                             'season': row_dict['season'],
                             'episode': row_dict['episode'],
                             'total_episode': row_dict['total_episode'],
                             'video_count': row_dict['video_count'],
-                            'selected_qualities': [q.strip() for q in row_dict['selected_qualities'].split(',') if q.strip()],
+                            'selected_qualities': row_dict['selected_qualities'].split(',') if row_dict['selected_qualities'] else [],
                             'base_caption': row_dict['base_caption'],
-                            'target_chat_id': row_dict['target_chat_id'],
-                            'username': row_dict['username'],
-                            'first_name': row_dict['first_name']
+                            'target_chat_id': row_dict['target_chat_id']
                         }
-                        return settings
                     else:
+                        default_settings = {
+                            'user_id': user_id,
+                            'season': 1,
+                            'episode': 1,
+                            'total_episode': 1,
+                            'video_count': 0,
+                            'selected_qualities': ["480p", "720p", "1080p"],
+                            'base_caption': DEFAULT_CAPTION,
+                            'target_chat_id': None
+                        }
+                        
                         await cur.execute('''
                             INSERT INTO user_settings 
                             (user_id, username, first_name, season, episode, total_episode, 
@@ -285,30 +214,30 @@ async def get_user_settings(user_id, username=None, first_name=None):
                         await conn.commit()
                         return default_settings
         except Exception as e:
-            logger.error(f"Error loading user settings from DB: {e}")
+            logger.error(f"Error loading user settings: {e}")
     
     # Fallback to JSON
     user_file = Path(f"user_{user_id}_progress.json")
     if user_file.exists():
-        try:
-            with open(user_file, "r") as f:
-                data = json.load(f)
-                # Merge loaded data with defaults to ensure new fields (like username) are present
-                return {**default_settings, **data}
-        except Exception as e:
-            logger.error(f"Error loading user settings from JSON: {e}")
+        with open(user_file, "r") as f:
+            return json.load(f)
     
-    return default_settings
+    return {
+        'user_id': user_id,
+        'season': 1,
+        'episode': 1,
+        'total_episode': 1,
+        'video_count': 0,
+        'selected_qualities': ["480p", "720p", "1080p"],
+        'base_caption': DEFAULT_CAPTION,
+        'target_chat_id': None
+    }
 
 
 async def save_user_settings(settings):
     """Save user settings"""
     user_id = settings['user_id']
     
-    # Ensure selected_qualities is a list before joining
-    if not isinstance(settings['selected_qualities'], list):
-        settings['selected_qualities'] = [str(q).strip() for q in settings['selected_qualities'] if str(q).strip()]
-
     if db_pool:
         try:
             async with db_pool.connection() as conn:
@@ -318,24 +247,20 @@ async def save_user_settings(settings):
                             season = %s, episode = %s, total_episode = %s, 
                             video_count = %s, selected_qualities = %s, 
                             base_caption = %s, target_chat_id = %s, 
-                            username = %s, first_name = %s,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE user_id = %s
                     ''', (settings['season'], settings['episode'], 
                         settings['total_episode'], settings['video_count'], 
                         ','.join(settings['selected_qualities']),
-                        settings['base_caption'], settings['target_chat_id'], 
-                        settings.get('username'), settings.get('first_name'), user_id))
+                        settings['base_caption'], settings['target_chat_id'], user_id))
                 await conn.commit()
             return
         except Exception as e:
-            logger.error(f"Error saving user settings to DB: {e}")
+            logger.error(f"Error saving user settings: {e}")
     
     # Fallback to JSON
     user_file = Path(f"user_{user_id}_progress.json")
-    # Clean up settings dictionary for safe JSON serialization (remove DB specific fields)
-    safe_settings = {k: v for k, v in settings.items() if k not in ['username', 'first_name']}
-    user_file.write_text(json.dumps(safe_settings, indent=2, default=str))
+    user_file.write_text(json.dumps(settings, indent=2))
 
 
 async def log_upload(user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id):
@@ -472,10 +397,6 @@ def get_menu_markup():
         [InlineKeyboardButton("🔢 Set Total Episode", callback_data="set_total_episode")],
         [InlineKeyboardButton("🎥 Quality Settings", callback_data="quality_menu")],
         [InlineKeyboardButton("🎯 Set Target Channel", callback_data="set_channel")],
-        [
-            InlineKeyboardButton("⬆️ Import Settings", callback_data="import_settings"),
-            InlineKeyboardButton("⬇️ Export Settings", callback_data="export_settings")
-        ],
         [InlineKeyboardButton("📊 My Statistics", callback_data="stats")],
         [InlineKeyboardButton("🔄 Reset Episode", callback_data="reset")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
@@ -517,29 +438,60 @@ async def start(client, message):
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Fetch settings and ensure basic user data is updated
-    settings = await get_user_settings(user_id, username, first_name)
-    settings['username'] = username # Update username if changed
-    settings['first_name'] = first_name
-    await save_user_settings(settings)
-
     try:
+        settings = await get_user_settings(user_id, username, first_name)
         await message.delete()
     except Exception as e:
-        logger.error(f"Error deleting start message: {e}")
+        logger.error(f"Error in start: {e}")
     
     await delete_last_message(client, message.chat.id)
     
     welcome_data = await get_welcome_message()
     
-    # Fallback welcome text
+    if welcome_data and welcome_data['file_id']:
+        try:
+            if welcome_data['message_type'] == 'photo':
+                sent = await client.send_photo(
+                    message.chat.id,
+                    photo=welcome_data['file_id'],
+                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_menu_markup()
+                )
+            elif welcome_data['message_type'] == 'video':
+                sent = await client.send_video(
+                    message.chat.id,
+                    video=welcome_data['file_id'],
+                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_menu_markup()
+                )
+            elif welcome_data['message_type'] == 'animation':
+                sent = await client.send_animation(
+                    message.chat.id,
+                    animation=welcome_data['file_id'],
+                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_menu_markup()
+                )
+            else:
+                sent = await client.send_message(
+                    message.chat.id,
+                    welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_menu_markup()
+                )
+            last_bot_messages[message.chat.id] = sent.id
+            return
+        except Exception as e:
+            logger.error(f"Error sending custom welcome: {e}")
+    
     welcome_text = (
         f"👋 <b>Welcome {first_name}!</b>\n\n"
         "🤖 <b>Your Personal Anime Caption Bot</b>\n\n"
         "✨ <b>Features:</b>\n"
         "• Auto-caption and forward videos\n"
-        "• **Batch Uploads** and **Rate Limiting**\n"
-        "• **Backup/Restore** settings via `/export`\n"
+        "• Multi-quality support\n"
         "• Episode tracking (personal)\n"
         "• Your own channel settings\n"
         "• Upload statistics\n\n"
@@ -560,49 +512,6 @@ async def start(client, message):
     last_bot_messages[message.chat.id] = sent.id
 
 
-# NEW: Command for exporting settings
-@app.on_message(filters.private & filters.command("export"))
-async def export_command(client, message):
-    user_id = message.from_user.id
-    try:
-        settings = await get_user_settings(user_id)
-        
-        # Add a verification field to prevent unauthorized imports
-        export_data = {
-            "user_id": settings['user_id'],
-            "export_timestamp": datetime.now().isoformat(),
-            "settings": settings
-        }
-
-        # Create an in-memory file for the JSON data
-        json_bytes = json.dumps(export_data, indent=2, default=str).encode('utf-8')
-        bio = io.BytesIO(json_bytes)
-        bio.name = f"settings_{user_id}.json"
-        
-        await message.reply_document(
-            document=bio,
-            caption=get_string("export_success"),
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.error(f"Export failed for user {user_id}: {e}")
-        await message.reply(get_string("export_fail"), parse_mode=ParseMode.HTML)
-
-
-# NEW: Command for importing settings
-@app.on_message(filters.private & filters.command("import"))
-async def import_command(client, message):
-    user_id = message.from_user.id
-    
-    waiting_for_input[user_id] = "import_settings"
-    
-    await message.reply(
-        get_string("import_prompt"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
-    )
-
-
 @app.on_message(filters.private & filters.command("help"))
 async def help_command(client, message):
     try:
@@ -616,8 +525,6 @@ async def help_command(client, message):
         "/start - Initialize bot and show main menu\n"
         "/help - Show this help message\n"
         "/stats - View your upload statistics\n"
-        "/export - Get a JSON file of your settings for backup\n"
-        "/import - Start the process to restore settings from a JSON file\n"
         "/admin - Admin panel (admin only)\n\n"
         "💡 <b>Tips:</b>\n"
         "• Make bot admin in your channel first\n"
@@ -642,12 +549,11 @@ async def stats_command(client, message):
     settings = await get_user_settings(user_id)
     total, today = await get_user_upload_stats(user_id)
     
-    channel_status = f"<code>{settings['target_chat_id']}</code>" if settings['target_chat_id'] else "❌ Not Set"
+    channel_status = "✅ Set" if settings['target_chat_id'] else "❌ Not Set"
     
     stats_text = (
         f"📊 <b>Your Statistics</b>\n\n"
-        f"👤 User ID: <code>{user_id}</code>\n"
-        f"👑 Admin Status: {'✅ Admin' if user_id in ADMIN_IDS else '❌ User'}\n\n"
+        f"👤 User ID: <code>{user_id}</code>\n\n"
         f"📤 <b>Uploads:</b>\n"
         f"• Total: <code>{total}</code>\n"
         f"• Today: <code>{today}</code>\n\n"
@@ -671,7 +577,11 @@ async def admin_command(client, message):
     user_id = message.from_user.id
     
     if user_id not in ADMIN_IDS:
-        await message.reply(get_string("admin_only"), parse_mode=ParseMode.HTML)
+        await message.reply(
+            "❌ <b>Access Denied!</b>\n\n"
+            "You don't have permission to use this command.",
+            parse_mode=ParseMode.HTML
+        )
         return
     
     total_users = await get_all_users_count()
@@ -679,7 +589,7 @@ async def admin_command(client, message):
     admin_text = (
         f"👑 <b>Admin Panel</b>\n\n"
         f"📊 <b>Global Statistics:</b>\n"
-        f"• Total Users: <code>{total_users}</code>\n"
+        f"• Total Users: <code>{total_users}</code>\n\n"
         f"🤖 Bot Status: ✅ Running\n"
         f"👤 Your Admin ID: <code>{user_id}</code>"
     )
@@ -704,7 +614,8 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     if data == "preview":
         if not settings['target_chat_id']:
             sent = await callback_query.message.reply(
-                get_string("error_channel_not_set"),
+                "⚠️ <b>No target channel set!</b>\n\n"
+                "Please set your target channel first.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_menu_markup()
             )
@@ -712,20 +623,11 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             return
             
         quality = settings["selected_qualities"][settings["video_count"] % len(settings["selected_qualities"])] if settings["selected_qualities"] else "N/A"
-        
-        channel_info = await get_channel_info(settings['target_chat_id'])
-        
         preview_text = settings["base_caption"] \
             .replace("{season}", f"{settings['season']:02}") \
             .replace("{episode}", f"{settings['episode']:02}") \
             .replace("{total_episode}", f"{settings['total_episode']:02}") \
-            .replace("{quality}", quality) \
-            .replace("{username}", settings.get('username') or 'N/A') \
-            .replace("{first_name}", settings.get('first_name') or 'N/A') \
-            .replace("{user_id}", str(user_id)) \
-            .replace("{chat_id}", str(channel_info['chat_id'])) \
-            .replace("{chat_title}", channel_info['title'])
-
+            .replace("{quality}", quality)
 
         sent = await callback_query.message.reply(
             f"📄 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
@@ -744,37 +646,36 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         waiting_for_input[user_id] = "caption"
         sent = await callback_query.message.reply(
             "✏️ <b>Set Your Caption Template</b>\n\n"
-            "Send the new caption (HTML supported)." + get_string("placeholder_help"),
+            "Send the new caption (HTML supported).\n\n"
+            "<b>Placeholders:</b>\n"
+            "{season}, {episode}, {total_episode}, {quality}",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
-        
+
     elif data == "set_season":
         waiting_for_input[user_id] = "season"
         sent = await callback_query.message.reply(
-            f"📺 <b>Set Season Number</b>\n\n"
-            f"Current: <code>{settings['season']}</code>\n"
-            f"Send the new season number:",
+            f"📺 Current season: <b>{settings['season']}</b>\n\n"
+            "Send the new season number.",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
-        
+
     elif data == "set_episode":
         waiting_for_input[user_id] = "episode"
         sent = await callback_query.message.reply(
-            f"🎬 <b>Set Episode Number</b>\n\n"
-            f"Current: <code>{settings['episode']}</code>\n"
-            f"Send the new episode number:",
+            f"🎬 Current episode: <b>{settings['episode']}</b>\n\n"
+            "Send the new episode number.",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
-        
+
     elif data == "set_total_episode":
         waiting_for_input[user_id] = "total_episode"
         sent = await callback_query.message.reply(
-            f"🔢 <b>Set Total Episode Counter</b>\n\n"
-            f"Current: <code>{settings['total_episode']}</code>\n"
-            f"Send the new total episode counter (e.g., 25 for a 25-episode anime):",
+            f"🔢 Current total episode: <b>{settings['total_episode']}</b>\n\n"
+            "Send the new total episode number.",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -797,7 +698,6 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         else:
             settings["selected_qualities"].append(quality)
         
-        # Ensure selected qualities are returned in ALL_QUALITIES order
         settings["selected_qualities"] = [q for q in ALL_QUALITIES if q in settings["selected_qualities"]]
         await save_user_settings(settings)
         
@@ -812,19 +712,6 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             )
         except:
             pass
-    
-    elif data == "export_settings":
-        await export_command(client, callback_query.message)
-        sent = await client.send_message(
-            chat_id, get_string("menu_welcome"),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-        
-    elif data == "import_settings":
-        await import_command(client, callback_query.message)
-
 
     elif data == "set_channel":
         sent = await callback_query.message.reply(
@@ -854,158 +741,115 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
+
+    elif data == "stats":
+        total, today = await get_user_upload_stats(user_id)
+        channel_status = "✅ Set" if settings['target_chat_id'] else "❌ Not Set"
         
-    elif data == "reset":
-        settings["season"] = 1
-        settings["episode"] = 1
-        settings["total_episode"] = 1
-        settings["video_count"] = 0
-        await save_user_settings(settings)
         sent = await callback_query.message.reply(
-            "🔄 <b>Episode progress reset!</b>\n\n"
-            "Season, Episode, Total Episode, and Video Count are all reset to 1/0.",
+            f"📊 <b>Your Statistics</b>\n\n"
+            f"👤 User ID: <code>{user_id}</code>\n\n"
+            f"📤 <b>Uploads:</b>\n"
+            f"• Total: <code>{total}</code>\n"
+            f"• Today: <code>{today}</code>\n\n"
+            f"📺 <b>Progress:</b>\n"
+            f"• Season: <code>{settings['season']}</code>\n"
+            f"• Episode: <code>{settings['episode']}</code>\n"
+            f"• Total Episodes: <code>{settings['total_episode']}</code>\n\n"
+            f"🎯 <b>Channel:</b> {channel_status}",
             parse_mode=ParseMode.HTML,
             reply_markup=get_menu_markup()
         )
         last_bot_messages[chat_id] = sent.id
 
-    elif data == "back_to_main" or data == "cancel":
+    elif data == "back_to_main":
         try:
-            if user_id in waiting_for_input:
-                del waiting_for_input[user_id]
             await callback_query.message.delete()
         except:
             pass
         
         sent = await client.send_message(
             chat_id,
-            get_string("menu_welcome"),
+            "👋 <b>Welcome Back!</b>\n\nUse the buttons below.",
             parse_mode=ParseMode.HTML,
             reply_markup=get_menu_markup()
         )
         last_bot_messages[chat_id] = sent.id
-        
+
+    elif data == "reset":
+        settings["episode"] = 1
+        settings["video_count"] = 0
+        await save_user_settings(settings)
+        sent = await callback_query.message.reply(
+            f"🔄 <b>Episode counter reset!</b>\n\n"
+            f"Starting from Episode {settings['episode']} (Season {settings['season']}).",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_menu_markup()
+        )
+        last_bot_messages[chat_id] = sent.id
+
+    elif data == "cancel":
+        if user_id in waiting_for_input:
+            del waiting_for_input[user_id]
+            sent = await callback_query.message.reply(
+                "❌ Process cancelled.",
+                reply_markup=get_menu_markup()
+            )
+            last_bot_messages[chat_id] = sent.id
+        else:
+            sent = await callback_query.message.reply(
+                "No ongoing process to cancel.",
+                reply_markup=get_menu_markup()
+            )
+            last_bot_messages[chat_id] = sent.id
+
     elif data == "admin_set_welcome":
         if user_id not in ADMIN_IDS:
-            await callback_query.message.reply(get_string("admin_only"), parse_mode=ParseMode.HTML)
+            await callback_query.answer("❌ Admin only!", show_alert=True)
             return
-            
+        
         waiting_for_input[user_id] = "admin_welcome"
         sent = await callback_query.message.reply(
             "📝 <b>Set Welcome Message</b>\n\n"
-            "Send a **Photo, Video, or Animation** with the desired caption (HTML supported) for the new welcome message.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+            "Send a photo/video/GIF with caption.\n\n"
+            "<b>Placeholders:</b>\n"
+            "{first_name}, {user_id}",
+            parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
-        
+
     elif data == "admin_preview_welcome":
-        # Check for welcome message and send it
         welcome_data = await get_welcome_message()
-        if welcome_data:
-            if welcome_data['message_type'] == 'photo':
-                await client.send_photo(
-                    chat_id, welcome_data['file_id'], 
-                    caption=welcome_data['caption'], 
-                    parse_mode=ParseMode.HTML
-                )
-            elif welcome_data['message_type'] == 'video':
-                await client.send_video(
-                    chat_id, welcome_data['file_id'], 
-                    caption=welcome_data['caption'], 
-                    parse_mode=ParseMode.HTML
-                )
-            elif welcome_data['message_type'] == 'animation':
-                await client.send_animation(
-                    chat_id, welcome_data['file_id'], 
-                    caption=welcome_data['caption'], 
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await callback_query.message.reply("❌ Invalid message type stored.")
-            
-        await client.send_message(
-            chat_id, get_string("menu_welcome"),
+        if welcome_data and welcome_data['file_id']:
+            try:
+                preview_caption = f"👁️ <b>Welcome Preview:</b>\n\n{welcome_data['caption']}\n\n<b>Type:</b> {welcome_data['message_type']}"
+                
+                if welcome_data['message_type'] == 'photo':
+                    await client.send_photo(chat_id, photo=welcome_data['file_id'], caption=preview_caption, parse_mode=ParseMode.HTML)
+                elif welcome_data['message_type'] == 'video':
+                    await client.send_video(chat_id, video=welcome_data['file_id'], caption=preview_caption, parse_mode=ParseMode.HTML)
+                elif welcome_data['message_type'] == 'animation':
+                    await client.send_animation(chat_id, animation=welcome_data['file_id'], caption=preview_caption, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.error(f"Error preview: {e}")
+        else:
+            sent = await callback_query.message.reply(
+                "📝 No custom welcome message set.",
+                reply_markup=get_admin_menu_markup()
+            )
+            last_bot_messages[chat_id] = sent.id
+
+    elif data == "admin_global_stats":
+        total_users = await get_all_users_count()
+        sent = await callback_query.message.reply(
+            f"📊 <b>Global Statistics</b>\n\n"
+            f"👥 Total Users: <code>{total_users}</code>\n"
+            f"🤖 Bot Status: ✅ Running\n"
+            f"🗄️ Database: {'✅ Connected' if db_pool else '⚠️ JSON'}",
             parse_mode=ParseMode.HTML,
             reply_markup=get_admin_menu_markup()
         )
-
-    elif data == "admin_global_stats":
-        if user_id not in ADMIN_IDS:
-            await callback_query.message.reply(get_string("admin_only"), parse_mode=ParseMode.HTML)
-            return
-            
-        total_users = await get_all_users_count()
-        
-        admin_text = (
-            f"👑 <b>Global Statistics</b>\n\n"
-            f"• Total Users: <code>{total_users}</code>\n"
-            f"• Database Status: {'✅ Connected' if db_pool else '❌ JSON Fallback'}"
-        )
-        await callback_query.message.reply(admin_text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-
-
-@app.on_message(filters.private & filters.document)
-async def handle_import_file(client, message: Message):
-    user_id = message.from_user.id
-    
-    if user_id not in waiting_for_input or waiting_for_input[user_id] != "import_settings":
-        return
-        
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    await delete_last_message(client, message.chat.id)
-
-    doc: Document = message.document
-    if doc.mime_type != 'application/json' or not doc.file_name.endswith('.json'):
-        await client.send_message(message.chat.id, "❌ **Import Failed!** Please upload a valid JSON file.", parse_mode=ParseMode.HTML)
-        del waiting_for_input[user_id]
-        return
-    
-    try:
-        file_path = await client.download_media(doc, in_memory=True)
-        json_data = json.load(file_path)
-        
-        if 'user_id' not in json_data or 'settings' not in json_data:
-            raise ValueError("Missing required top-level keys ('user_id', 'settings').")
-        
-        imported_user_id = json_data['user_id']
-        imported_settings = json_data['settings']
-        
-        if imported_user_id != user_id:
-            await client.send_message(
-                message.chat.id, 
-                get_string("import_invalid").format(expected_id=user_id, found_id=imported_user_id),
-                parse_mode=ParseMode.HTML
-            )
-            return
-
-        required_keys = ['season', 'episode', 'total_episode', 'video_count', 'selected_qualities', 'base_caption']
-        if not all(key in imported_settings for key in required_keys):
-            raise ValueError("Settings block is missing critical progress keys.")
-        
-        current_settings = await get_user_settings(user_id)
-        current_settings.update(imported_settings)
-        
-        if isinstance(current_settings['selected_qualities'], (list, tuple)):
-            current_settings['selected_qualities'] = [str(q) for q in current_settings['selected_qualities']]
-        
-        await save_user_settings(current_settings)
-        
-        await client.send_message(message.chat.id, get_string("import_success"), parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-        
-    except Exception as e:
-        logger.error(f"Import failed for user {user_id}: {e}")
-        await client.send_message(
-            message.chat.id, 
-            get_string("import_invalid").format(expected_id=user_id, found_id=imported_user_id if 'imported_user_id' in locals() else 'N/A')
-        )
-    finally:
-        if user_id in waiting_for_input and waiting_for_input[user_id] == "import_settings":
-            del waiting_for_input[user_id]
+        last_bot_messages[chat_id] = sent.id
 
 
 @app.on_message(filters.private & filters.forwarded)
@@ -1026,20 +870,16 @@ async def handle_forwarded(client, message: Message):
             settings["target_chat_id"] = chat.id
             await save_user_settings(settings)
             
-            chat_username = getattr(chat, 'username', None)
-            chat_title = getattr(chat, 'title', str(chat.id))
-            chat_type = str(getattr(chat, 'type', 'unknown'))
-            
-            await save_channel_info(user_id, chat.id, chat_username, chat_title, chat_type)
+            await save_channel_info(user_id, chat.id, chat.username if chat.username else None, chat.title, str(chat.type))
             
             del waiting_for_input[user_id]
             
             sent = await client.send_message(
                 message.chat.id,
                 f"✅ <b>Channel updated!</b>\n\n"
-                f"📝 Title: <b>{chat_title}</b>\n"
+                f"📝 Title: <b>{chat.title}</b>\n"
                 f"🆔 ID: <code>{chat.id}</code>\n"
-                f"👤 Username: @{chat_username if chat_username else 'N/A'}",
+                f"👤 Username: @{chat.username if chat.username else 'N/A'}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_menu_markup()
             )
@@ -1057,6 +897,7 @@ async def handle_forwarded(client, message: Message):
 async def handle_media_for_welcome(client, message: Message):
     user_id = message.from_user.id
     
+    # Only process if admin is setting welcome message
     if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
         return
     
@@ -1101,6 +942,7 @@ async def receive_input(client, message):
     user_id = message.from_user.id
     chat_id = message.chat.id
 
+    # Ignore if not waiting for input or if it's a command
     if user_id not in waiting_for_input or message.text.startswith('/'):
         return
 
@@ -1168,18 +1010,14 @@ async def receive_input(client, message):
             settings["target_chat_id"] = chat.id
             await save_user_settings(settings)
             
-            chat_username = getattr(chat, 'username', None)
-            chat_title = getattr(chat, 'title', str(chat.id))
-            chat_type = str(getattr(chat, 'type', 'unknown'))
-            
-            await save_channel_info(user_id, chat.id, chat_username, chat_title, chat_type)
+            await save_channel_info(user_id, chat.id, chat.username if hasattr(chat, 'username') and chat.username else None, chat.title if hasattr(chat, 'title') else str(chat.id), str(chat.type))
             
             del waiting_for_input[user_id]
             
             sent = await client.send_message(
                 chat_id,
                 f"✅ <b>Channel updated!</b>\n\n"
-                f"📝 Title: <b>{chat_title}</b>\n"
+                f"📝 Title: <b>{chat.title if hasattr(chat, 'title') else 'N/A'}</b>\n"
                 f"🆔 ID: <code>{chat.id}</code>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_menu_markup()
@@ -1196,65 +1034,36 @@ async def receive_input(client, message):
 
 
 @app.on_message(filters.private & filters.video)
-async def auto_forward(client, message: Message):
+async def auto_forward(client, message):
     user_id = message.from_user.id
     
+    # Ignore if waiting for input
     if user_id in waiting_for_input:
         return
-        
-    COOLDOWN_TIME = 10 
-    is_admin = user_id in ADMIN_IDS
-    current_time = time.time()
     
-    if not is_admin and user_id in last_upload_time:
-        elapsed = current_time - last_upload_time[user_id]
-        if elapsed < COOLDOWN_TIME:
-            await message.reply(
-                get_string("rate_limit").format(cooldown=COOLDOWN_TIME, elapsed=elapsed),
-                parse_mode=ParseMode.HTML
-            )
-            return
-
-    if message.media_group_id:
-        if message.media_group_id in media_group_cache:
-            return
-        
-        media_group_cache[message.media_group_id] = 'processing'
-        await asyncio.sleep(2)
-        
     user_lock = get_user_lock(user_id)
     
     async with user_lock:
+        settings = await get_user_settings(user_id)
+        
+        if not settings["target_chat_id"]:
+            await message.reply("❌ No target channel set!\n\nUse /start to configure.", parse_mode=ParseMode.HTML)
+            return
+        
+        if not settings["selected_qualities"]:
+            await message.reply("❌ No qualities selected!\n\nUse /start to configure.", parse_mode=ParseMode.HTML)
+            return
+
+        file_id = message.video.file_id
+        quality = settings["selected_qualities"][settings["video_count"] % len(settings["selected_qualities"])]
+
+        caption = settings["base_caption"] \
+            .replace("{season}", f"{settings['season']:02}") \
+            .replace("{episode}", f"{settings['episode']:02}") \
+            .replace("{total_episode}", f"{settings['total_episode']:02}") \
+            .replace("{quality}", quality)
+
         try:
-            settings = await get_user_settings(user_id)
-            
-            if not settings["target_chat_id"]:
-                await message.reply(get_string("error_channel_not_set"), parse_mode=ParseMode.HTML)
-                return
-            
-            if not settings["selected_qualities"]:
-                await message.reply("❌ No qualities selected!\n\nUse /start to configure.", parse_mode=ParseMode.HTML)
-                return
-
-            file_id = message.video.file_id
-            
-            total_qualities = len(settings["selected_qualities"])
-            quality = settings["selected_qualities"][settings["video_count"] % total_qualities]
-
-            channel_info = await get_channel_info(settings["target_chat_id"])
-            
-            caption = settings["base_caption"] \
-                .replace("{season}", f"{settings['season']:02}") \
-                .replace("{episode}", f"{settings['episode']:02}") \
-                .replace("{total_episode}", f"{settings['total_episode']:02}") \
-                .replace("{quality}", quality) \
-                .replace("{username}", message.from_user.username or 'N/A') \
-                .replace("{first_name}", message.from_user.first_name or 'N/A') \
-                .replace("{user_id}", str(user_id)) \
-                .replace("{chat_id}", str(channel_info['chat_id'])) \
-                .replace("{chat_title}", channel_info['title'])
-
-
             await client.send_video(
                 chat_id=settings["target_chat_id"],
                 video=file_id,
@@ -1263,29 +1072,13 @@ async def auto_forward(client, message: Message):
             )
             
             await log_upload(user_id, settings['season'], settings['episode'], settings['total_episode'], quality, file_id, caption, settings['target_chat_id'])
-            
-            if not is_admin:
-                last_upload_time[user_id] = current_time
 
-            settings["video_count"] += 1
-            if settings["video_count"] >= total_qualities:
-                settings["episode"] += 1
-                settings["total_episode"] += 1
-                settings["video_count"] = 0
-                next_count = 0
-            else:
-                next_count = settings["video_count"]
-                
-            await save_user_settings(settings)
-            
             reply_msg = await message.reply(
-                get_string("upload_success").format(
-                    season=settings['season'],
-                    episode=settings['episode'] - (1 if settings["video_count"] == 0 and total_qualities > 0 else 0), 
-                    quality=quality,
-                    current_video=next_count if next_count > 0 else total_qualities,
-                    total_videos=total_qualities
-                ),
+                f"✅ <b>Video forwarded!</b>\n\n"
+                f"📺 Season: {settings['season']}\n"
+                f"🎬 Episode: {settings['episode']}\n"
+                f"🎥 Quality: {quality}\n"
+                f"📊 Progress: {settings['video_count'] + 1}/{len(settings['selected_qualities'])}",
                 parse_mode=ParseMode.HTML
             )
             
@@ -1296,15 +1089,25 @@ async def auto_forward(client, message: Message):
             except:
                 pass
 
+            settings["video_count"] += 1
+
+            if settings["video_count"] >= len(settings["selected_qualities"]):
+                settings["episode"] += 1
+                settings["total_episode"] += 1
+                settings["video_count"] = 0
+
+            await save_user_settings(settings)
+
         except Exception as e:
-            logger.error(f"Error forwarding video for user {user_id}: {traceback.format_exc()}")
+            logger.error(f"Error forwarding video: {e}")
             await message.reply(
-                get_string("upload_error_not_admin").format(target_chat_id=settings['target_chat_id']),
+                f"❌ <b>Error forwarding!</b>\n\n"
+                f"Make sure:\n"
+                f"• Bot is admin in channel\n"
+                f"• Channel ID is correct: <code>{settings['target_chat_id']}</code>",
                 parse_mode=ParseMode.HTML
             )
 
-
-# --- WEBHOOK/SERVER SETUP (FIX APPLIED HERE) ---
 
 async def telegram_webhook(request):
     """Handle incoming webhook updates from Telegram"""
@@ -1324,19 +1127,234 @@ async def telegram_webhook(request):
 
 
 async def process_update_manually(update_dict):
-    """
-    FIXED: Process updates from webhook using Pyrogram's standard dispatcher method.
-    This replaces the unreliable manual object construction to fix the RuntimeWarning.
-    
-    The function name is now process_updates and takes a list of updates, even if only one.
-    """
+    """Process updates from webhook using Pyrogram's internal methods"""
     try:
-        # FIX: Replaced the incorrect app.dispatcher.process_update with app.process_updates
-        # This method handles a list of raw updates (JSON dictionaries) received from the webhook.
-        await app.process_updates([update_dict])
-        logger.info("✅ Update dispatched successfully.")
+        # Import Telegram raw types for conversion
+        from pyrogram import raw
+        import pyrogram
+        import inspect # <-- FIX: Import inspect for handling callback query arguments
+        
+        logger.info(f"🔄 Processing update: {list(update_dict.keys())}")
+        
+        # Convert Telegram Bot API update to MTProto format
+        if 'message' in update_dict:
+            msg = update_dict['message']
+            logger.info(f"📩 Message from user {msg.get('from', {}).get('id')}: {msg.get('text', 'N/A')}")
+            
+            # Use Pyrogram's raw API to create proper update object
+            try:
+                # Create a raw UpdateNewMessage
+                from_user = msg.get('from', {})
+                chat = msg.get('chat', {})
+                
+                # Build raw peer objects
+                peer_user = raw.types.PeerUser(user_id=from_user.get('id', 0))
+                
+                # Build raw user object
+                user = raw.types.User(
+                    id=from_user.get('id', 0),
+                    is_self=False,
+                    contact=False,
+                    mutual_contact=False,
+                    deleted=False,
+                    bot=from_user.get('is_bot', False),
+                    bot_chat_history=False,
+                    bot_nochats=False,
+                    verified=False,
+                    restricted=False,
+                    min=False,
+                    bot_inline_geo=False,
+                    support=False,
+                    scam=False,
+                    apply_min_photo=False,
+                    fake=False,
+                    bot_attach_menu=False,
+                    premium=False,
+                    attach_menu_enabled=False,
+                    bot_can_edit=False,
+                    close_friend=False,
+                    stories_hidden=False,
+                    stories_unavailable=False,
+                    access_hash=0,
+                    first_name=from_user.get('first_name', ''),
+                    last_name=from_user.get('last_name'),
+                    username=from_user.get('username'),
+                    phone=None,
+                    photo=None,
+                    status=None,
+                    bot_info_version=None,
+                    restriction_reason=None,
+                    bot_inline_placeholder=None,
+                    lang_code=from_user.get('language_code'),
+                    emoji_status=None,
+                    usernames=None,
+                    stories_max_id=None,
+                    color=None,
+                    profile_color=None,
+                    bot_active_users=None
+                )
+                
+                # Build entities if present
+                entities = []
+                if 'entities' in msg:
+                    for ent in msg['entities']:
+                        if ent['type'] == 'bot_command':
+                            entities.append(raw.types.MessageEntityBotCommand(
+                                offset=ent['offset'],
+                                length=ent['length']
+                            ))
+                
+                # Build raw message
+                raw_message = raw.types.Message(
+                    id=msg.get('message_id', 0),
+                    peer_id=peer_user,
+                    from_id=peer_user,
+                    date=msg.get('date', 0),
+                    message=msg.get('text', ''),
+                    out=False,
+                    mentioned=False,
+                    media_unread=False,
+                    silent=False,
+                    post=False,
+                    from_scheduled=False,
+                    legacy=False,
+                    edit_hide=False,
+                    pinned=False,
+                    noforwards=False,
+                    entities=entities if entities else None
+                )
+                
+                # Parse to Pyrogram Message object
+                parsed_message = pyrogram.types.Message._parse(
+                    client=app,
+                    message=raw_message,
+                    users={from_user.get('id', 0): user},
+                    chats={},
+                    is_scheduled=False,
+                    replies=0
+                )
+                
+                logger.info(f"✅ Parsed message: {parsed_message.text}")
+                logger.info(f"✅ Parsed message: {parsed_message.text}")
+                
+                # Now dispatch through handlers
+                from pyrogram.handlers import MessageHandler
+                for group in sorted(app.dispatcher.groups.keys()):
+                    for handler in app.dispatcher.groups[group]:
+                        if isinstance(handler, MessageHandler):
+                            try:
+                                if handler.filters:
+                                    if await handler.filters(app, parsed_message):
+                                        logger.info(f"✅ Executing handler: {handler.callback.__name__}")
+                                        await handler.callback(app, parsed_message)
+                                        break
+                                else:
+                                    await handler.callback(app, parsed_message)
+                                    break
+                            except Exception as e:
+                                logger.error(f"❌ Handler error: {e}", exc_info=True)
+                
+            except Exception as e:
+                logger.error(f"❌ Error processing message: {e}", exc_info=True)
+        
+        # Handle callback queries
+        elif 'callback_query' in update_dict:
+            cb = update_dict['callback_query']
+            logger.info(f"🔘 Callback query from user {cb.get('from', {}).get('id')}: {cb.get('data')}")
+            
+            try:
+                from_user = cb.get('from', {})
+                message = cb.get('message', {})
+                
+                # Get valid parameters for User constructor
+                user_sig = inspect.signature(raw.types.User.__init__)
+                valid_params = set(user_sig.parameters.keys()) - {'self'}
+                
+                # Build user dict with all possible fields
+                user_dict = {
+                    'id': from_user.get('id', 0),
+                    'is_self': False,
+                    'contact': False,
+                    'mutual_contact': False,
+                    'deleted': False,
+                    'bot': from_user.get('is_bot', False),
+                    'bot_chat_history': False,
+                    'bot_nochats': False,
+                    'verified': False,
+                    'restricted': False,
+                    'min': False,
+                    'bot_inline_geo': False,
+                    'support': False,
+                    'scam': False,
+                    'apply_min_photo': False,
+                    'fake': False,
+                    'bot_attach_menu': False,
+                    'premium': False,
+                    'attach_menu_enabled': False,
+                    'bot_can_edit': False,
+                    'close_friend': False,
+                    'stories_hidden': False,
+                    'stories_unavailable': False,
+                    'contact_require_premium': False,
+                    'bot_business': False,
+                    'bot_has_main_app': False,
+                    'access_hash': 0,
+                    'first_name': from_user.get('first_name', ''),
+                    'last_name': from_user.get('last_name'),
+                    'username': from_user.get('username'),
+                    'phone': None,
+                    'photo': None,
+                    'status': None,
+                    'bot_info_version': None,
+                    'restriction_reason': None,
+                    'bot_inline_placeholder': None,
+                    'lang_code': from_user.get('language_code'),
+                    'emoji_status': None,
+                    'usernames': None,
+                    'stories_max_id': None,
+                    'color': None,
+                    'profile_color': None,
+                    'bot_active_users': None
+                }
+                
+                # Filter to only valid parameters
+                filtered_user_dict = {k: v for k, v in user_dict.items() if k in valid_params}
+                
+                # Build raw user with only supported fields
+                user = raw.types.User(**filtered_user_dict)
+                
+                # Build raw callback query
+                raw_callback = raw.types.UpdateBotCallbackQuery(
+                    query_id=int(cb.get('id', '0')),
+                    user_id=from_user.get('id', 0),
+                    peer=raw.types.PeerUser(user_id=from_user.get('id', 0)),
+                    msg_id=message.get('message_id', 0),
+                    chat_instance=int(cb.get('chat_instance', '0')),
+                    data=cb.get('data', '').encode()
+                )
+                
+                # Parse to Pyrogram CallbackQuery
+                parsed_callback = pyrogram.types.CallbackQuery._parse(app, raw_callback, {from_user.get('id', 0): user})
+                
+                logger.info(f"✅ Parsed callback: {parsed_callback.data}")
+                
+                # Dispatch through handlers
+                from pyrogram.handlers import CallbackQueryHandler
+                for group in sorted(app.dispatcher.groups.keys()):
+                    for handler in app.dispatcher.groups[group]:
+                        if isinstance(handler, CallbackQueryHandler):
+                            try:
+                                if handler.filters is None or await handler.filters(app, parsed_callback):
+                                    logger.info(f"✅ Executing callback handler")
+                                    await handler.callback(app, parsed_callback)
+                                    break
+                            except Exception as e:
+                                logger.error(f"❌ Callback handler error: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"❌ Error processing callback: {e}", exc_info=True)
+    
     except Exception as e:
-        logger.error(f"❌ Error processing update manually via dispatcher: {e}", exc_info=True)
+        logger.error(f"❌ Fatal error in process_update_manually: {e}", exc_info=True)
 
 
 async def health_check(request):
@@ -1361,10 +1379,12 @@ async def setup_webhook():
         return False
     
     try:
+        # Use raw API call to set webhook
         import httpx
         
         telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
         
+        # Delete existing webhook
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{telegram_api_url}/deleteWebhook",
@@ -1374,6 +1394,7 @@ async def setup_webhook():
             if result.get('ok'):
                 logger.info("🗑️ Deleted old webhook")
             
+            # Set new webhook
             response = await client.post(
                 f"{telegram_api_url}/setWebhook",
                 json={
@@ -1387,6 +1408,7 @@ async def setup_webhook():
             if result.get('ok'):
                 logger.info(f"✅ Webhook set successfully: {WEBHOOK_URL}")
                 
+                # Verify webhook
                 response = await client.get(f"{telegram_api_url}/getWebhookInfo")
                 webhook_info = response.json()
                 
@@ -1422,7 +1444,7 @@ async def self_ping():
 
 async def start_web_server():
     global web_app
-    
+    # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
         logger.info(f"🔗 Webhook endpoint: {WEBHOOK_PATH}")
@@ -1439,12 +1461,15 @@ async def start_web_server():
 
 
 async def main():
+    # Start web server
     logger.info("🌐 Starting web server...")
     await start_web_server()
     
+    # Initialize database
     logger.info("🗄️ Initializing database...")
     await init_db()
     
+    # Start bot
     logger.info("🚀 Starting bot...")
     
     try:
@@ -1453,12 +1478,13 @@ async def main():
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
+        # Setup webhook if URL is provided
         if WEBHOOK_URL:
             webhook_success = await setup_webhook()
             if webhook_success:
                 logger.info("🔗 Running in WEBHOOK mode")
             else:
-                logger.warning("⚠️ Webhook setup failed, falling back to POLLING mode (untested configuration)")
+                logger.warning("⚠️ Webhook setup failed, falling back to POLLING mode")
         else:
             logger.info("📡 Running in POLLING mode")
         
@@ -1466,8 +1492,10 @@ async def main():
         logger.info("✅ ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 50)
         
+        # Start self-ping
         asyncio.create_task(self_ping())
         
+        # Keep alive
         while True:
             await asyncio.sleep(3600)
         
@@ -1478,6 +1506,7 @@ async def main():
         logger.info("🛑 Shutting down...")
         try:
             if WEBHOOK_URL:
+                # Delete webhook on shutdown
                 import httpx
                 async with httpx.AsyncClient() as client:
                     await client.post(
