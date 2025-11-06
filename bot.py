@@ -1144,6 +1144,7 @@ async def process_update_manually(update_dict):
             try:
                 # Create a proper Pyrogram Message object from Bot API data
                 from pyrogram import types
+                from pyrogram.enums import ChatType
                 
                 from_user_data = msg.get('from', {})
                 chat_data = msg.get('chat', {})
@@ -1162,7 +1163,7 @@ async def process_update_manually(update_dict):
                 # Build Chat object (for private chats, it's the same as user)
                 chat_obj = types.Chat(
                     id=chat_data.get('id'),
-                    type=types.ChatType.PRIVATE if chat_data.get('type') == 'private' else types.ChatType.GROUP,
+                    type=ChatType.PRIVATE if chat_data.get('type') == 'private' else ChatType.GROUP,
                     first_name=chat_data.get('first_name'),
                     last_name=chat_data.get('last_name'),
                     username=chat_data.get('username'),
