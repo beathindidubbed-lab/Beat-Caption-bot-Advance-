@@ -972,7 +972,7 @@ async def handle_media_for_welcome(client, message: Message):
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_admin_menu_markup()
             )
-            last_bot_messages[message.chat.id] = sent.id
+            last_bot_messages[chat_id] = sent.id
 
 
 async def receive_input(client, message):
