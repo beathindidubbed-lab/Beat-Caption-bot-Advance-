@@ -85,29 +85,7 @@ def get_user_lock(user_id):
     return user_locks[user_id]
 
 
-# Handler registration functions - define all handlers here
-def register_handlers():
-    """Register all bot handlers using explicit add_handler"""
-    
-    # Explicitly add handlers to the app dispatcher
-    app.add_handler(MessageHandler(start, filters.private & filters.command("start")))
-    app.add_handler(MessageHandler(help_command, filters.private & filters.command("help")))
-    app.add_handler(MessageHandler(stats_command, filters.private & filters.command("stats")))
-    app.add_handler(MessageHandler(admin_command, filters.private & filters.command("admin")))
-    
-    # Callback queries need a separate handler type
-    app.add_handler(CallbackQueryHandler(handle_buttons))
-
-    app.add_handler(MessageHandler(handle_forwarded, filters.private & filters.forwarded))
-    app.add_handler(MessageHandler(handle_media_for_welcome, filters.private & (filters.photo | filters.video | filters.animation)))
-    
-    # Text handler (must not overlap with commands or forwards)
-    app.add_handler(MessageHandler(receive_input, filters.private & filters.text & ~filters.forwarded))
-    
-    # Video forward handler (added ~filters.media_group for robustness)
-    app.add_handler(MessageHandler(auto_forward, filters.private & filters.video & ~filters.forwarded & ~filters.media_group))
-    
-    logger.info("✅ All handlers registered")
+# --- HANDLER REGISTRATION LOGIC REMOVED (Replaced by decorators below) ---
 
 
 async def init_db():
@@ -457,7 +435,9 @@ def get_channel_set_markup():
     ])
 
 
-# Handler functions (will be registered in register_handlers())
+# Handler functions (NOW REGISTERED VIA DECORATORS)
+
+@app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
     logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
     
@@ -477,6 +457,7 @@ async def start(client, message):
     
     if welcome_data and welcome_data['file_id']:
         try:
+            # Code to send media welcome message...
             if welcome_data['message_type'] == 'photo':
                 sent = await client.send_photo(
                     message.chat.id,
@@ -539,6 +520,7 @@ async def start(client, message):
     last_bot_messages[message.chat.id] = sent.id
 
 
+@app.on_message(filters.private & filters.command("help"))
 async def help_command(client, message):
     try:
         await message.delete()
@@ -564,6 +546,7 @@ async def help_command(client, message):
     await message.reply(help_text, parse_mode=ParseMode.HTML)
 
 
+@app.on_message(filters.private & filters.command("stats"))
 async def stats_command(client, message):
     try:
         await message.delete()
@@ -592,6 +575,7 @@ async def stats_command(client, message):
     await message.reply(stats_text, parse_mode=ParseMode.HTML)
 
 
+@app.on_message(filters.private & filters.command("admin"))
 async def admin_command(client, message):
     try:
         await message.delete()
@@ -621,6 +605,7 @@ async def admin_command(client, message):
     await message.reply(admin_text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
 
 
+@app.on_callback_query()
 async def handle_buttons(client, callback_query: CallbackQuery):
     try:
         await callback_query.answer()
@@ -875,6 +860,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         last_bot_messages[chat_id] = sent.id
 
 
+@app.on_message(filters.private & filters.forwarded)
 async def handle_forwarded(client, message: Message):
     user_id = message.from_user.id
     
@@ -915,6 +901,7 @@ async def handle_forwarded(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
 async def handle_media_for_welcome(client, message: Message):
     user_id = message.from_user.id
     
@@ -958,6 +945,7 @@ async def handle_media_for_welcome(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
+@app.on_message(filters.private & filters.text & ~filters.forwarded)
 async def receive_input(client, message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -1053,6 +1041,7 @@ async def receive_input(client, message):
             last_bot_messages[chat_id] = sent.id
 
 
+@app.on_message(filters.private & filters.video & ~filters.forwarded & ~filters.media_group)
 async def auto_forward(client, message):
     user_id = message.from_user.id
     
@@ -1149,21 +1138,17 @@ async def process_update_manually(update_dict):
     """Process updates from webhook using Pyrogram's internal methods"""
     try:
         # Import Telegram raw types for conversion
-        from pyrogram import raw
-        import pyrogram
+        from pyrogram import types
+        from pyrogram.enums import ChatType
         
         logger.info(f"🔄 Processing update: {list(update_dict.keys())}")
         
-        # Convert Telegram Bot API update to MTProto format
+        # Handle messages
         if 'message' in update_dict:
             msg = update_dict['message']
             logger.info(f"📩 Message from user {msg.get('from', {}).get('id')}: {msg.get('text', 'N/A')}")
             
             try:
-                # Create a proper Pyrogram Message object from Bot API data
-                from pyrogram import types
-                from pyrogram.enums import ChatType
-                
                 from_user_data = msg.get('from', {})
                 chat_data = msg.get('chat', {})
                 
@@ -1211,11 +1196,12 @@ async def process_update_manually(update_dict):
                     for ent in msg.get('entities', []):
                         if ent.get('type') == 'bot_command':
                             # Create a simple entity object
-                            entity = type('MessageEntity', (), {
-                                'type': 'bot_command',
-                                'offset': ent.get('offset'),
-                                'length': ent.get('length')
-                            })()
+                            entity = types.MessageEntity(
+                                type='bot_command',
+                                offset=ent.get('offset'),
+                                length=ent.get('length'),
+                                client=app
+                            )
                             message_obj.entities.append(entity)
                 
                 # Add command info if it's a command
@@ -1227,19 +1213,50 @@ async def process_update_manually(update_dict):
                 
                 # Handle media fields for filters
                 if 'video' in msg:
-                    # Simplistic way to populate needed media attribute for Pyrogram filters
-                    message_obj.video = types.Video(**{
-                        k: v for k, v in msg['video'].items() if k in inspect.signature(types.Video.__init__).parameters
-                    })
+                    video_data = msg['video']
+                    message_obj.video = types.Video(
+                        file_id=video_data.get('file_id'),
+                        file_unique_id=video_data.get('file_unique_id'),
+                        width=video_data.get('width'),
+                        height=video_data.get('height'),
+                        duration=video_data.get('duration'),
+                        mime_type=video_data.get('mime_type'),
+                        file_size=video_data.get('file_size'),
+                        client=app
+                    )
+                    message_obj.media = types.enums.MessageMediaType.VIDEO
+
                 if 'photo' in msg:
-                    message_obj.photo = types.Photo(**{
-                        k: v for k, v in msg['photo'].items() if k in inspect.signature(types.Photo.__init__).parameters
-                    })
-                if 'animation' in msg:
-                    message_obj.animation = types.Animation(**{
-                        k: v for k, v in msg['animation'].items() if k in inspect.signature(types.Animation.__init__).parameters
-                    })
+                    # Get largest photo size
+                    photo_sizes = msg['photo']['sizes']
+                    largest_photo = max(photo_sizes, key=lambda p: p['file_size'])
+                    message_obj.photo = types.Photo(
+                        file_id=largest_photo.get('file_id'),
+                        file_unique_id=largest_photo.get('file_unique_id'),
+                        width=largest_photo.get('width'),
+                        height=largest_photo.get('height'),
+                        file_size=largest_photo.get('file_size'),
+                        client=app
+                    )
+                    message_obj.media = types.enums.MessageMediaType.PHOTO
                 
+                if 'animation' in msg:
+                    animation_data = msg['animation']
+                    message_obj.animation = types.Animation(
+                        file_id=animation_data.get('file_id'),
+                        file_unique_id=animation_data.get('file_unique_id'),
+                        width=animation_data.get('width'),
+                        height=animation_data.get('height'),
+                        duration=animation_data.get('duration'),
+                        mime_type=animation_data.get('mime_type'),
+                        file_size=animation_data.get('file_size'),
+                        client=app
+                    )
+                    message_obj.media = types.enums.MessageMediaType.ANIMATION
+                
+                if 'caption' in msg:
+                    message_obj.caption = msg['caption']
+                    
                 if 'forward_from_chat' in msg:
                     # Populate forward_from_chat for filters.forwarded
                     chat_data = msg['forward_from_chat']
@@ -1251,41 +1268,30 @@ async def process_update_manually(update_dict):
                         client=app
                     )
 
-                logger.info(f"✅ Created message object: {message_obj.text}")
+                logger.info(f"✅ Created message object: {message_obj.text or 'Media'}")
                 logger.info(f"📋 Message attributes: chat.id={message_obj.chat.id}, from_user.id={message_obj.from_user.id}, command={getattr(message_obj, 'command', None)}")
                 
                 # Now dispatch through handlers
-                from pyrogram.handlers import MessageHandler
                 handlers_found = False
-                
-                logger.info(f"🔍 Checking {len(app.dispatcher.groups)} handler groups")
                 
                 # Recalculate total handlers here to confirm registration
                 total_handlers_registered = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+                logger.info(f"🔍 Checking {total_handlers_registered} handlers in dispatcher groups")
                 
                 for group in sorted(app.dispatcher.groups.keys()):
-                    logger.info(f"📦 Checking group {group} with {len(app.dispatcher.groups[group])} handlers")
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, MessageHandler):
                             handler_name = handler.callback.__name__
                             try:
-                                # Check if filter passes
                                 filter_result = True
                                 if handler.filters:
-                                    try:
-                                        filter_result = await handler.filters(app, message_obj)
-                                        logger.info(f"🔎 Handler '{handler_name}': filter={'PASSED' if filter_result else 'FAILED'}")
-                                    except Exception as filter_error:
-                                        logger.error(f"Filter error for {handler_name}: {filter_error}", exc_info=True)
-                                        continue
-                                else:
-                                    logger.info(f"🔎 Handler '{handler_name}': no filter (will execute)")
+                                    filter_result = await handler.filters(app, message_obj)
                                 
                                 if filter_result:
                                     handlers_found = True
-                                    logger.info(f"✅ Executing handler: {handler_name}")
+                                    logger.info(f"✅ Executing message handler: {handler_name}")
                                     await handler.callback(app, message_obj)
-                                    break
+                                    break # Stop after finding the first matching handler in a group
                             except Exception as e:
                                 logger.error(f"❌ Handler error in {handler_name}: {e}", exc_info=True)
                     
@@ -1293,8 +1299,7 @@ async def process_update_manually(update_dict):
                         break
                 
                 if not handlers_found:
-                    logger.warning(f"⚠️ No handlers matched for message: {message_obj.text}")
-                    logger.warning(f"💡 Total handlers registered: {total_handlers_registered}")
+                    logger.warning(f"⚠️ No handlers matched for message: {message_obj.text or 'Media'}")
                     
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}", exc_info=True)
@@ -1305,9 +1310,6 @@ async def process_update_manually(update_dict):
             logger.info(f"🔘 Callback query from user {cb.get('from', {}).get('id')}: {cb.get('data')}")
             
             try:
-                from pyrogram import types
-                from pyrogram.enums import ChatType
-                
                 from_user_data = cb.get('from', {})
                 message_data = cb.get('message', {})
                 
@@ -1333,7 +1335,7 @@ async def process_update_manually(update_dict):
                     client=app
                 )
                 
-                # Build Message object
+                # Build Message object (for context)
                 message_obj = types.Message(
                     id=message_data.get('message_id'),
                     from_user=user_obj,
@@ -1362,7 +1364,7 @@ async def process_update_manually(update_dict):
                         if isinstance(handler, CallbackQueryHandler):
                             try:
                                 if handler.filters is None or await handler.filters(app, callback_obj):
-                                    logger.info(f"✅ Executing callback handler")
+                                    logger.info(f"✅ Executing callback handler: {handler.callback.__name__}")
                                     await handler.callback(app, callback_obj)
                                     break
                             except Exception as e:
@@ -1491,28 +1493,18 @@ async def main():
     logger.info("🚀 Starting bot...")
     
     try:
-        # --- START OF THE FIX ---
-        # 1. Start the app first to fully initialize the internal dispatcher
+        # Handlers are registered globally via decorators. We only need to start the client.
         await app.start()
         
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
-        # 2. Register handlers AFTER app.start() is complete
-        logger.info("📝 Registering handlers...")
-        register_handlers()
-        logger.info("✅ Handler registration complete")
-
-        # Log registered handlers (this check should now show handlers > 0)
+        # New check for handlers to ensure they are available in dispatcher groups
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
-        logger.info(f"📝 Total handlers registered: {total_handlers}")
+        logger.info(f"📝 Total handlers found in dispatcher: {total_handlers}")
         
-        for group_id, handlers in app.dispatcher.groups.items():
-            logger.info(f"  Group {group_id}: {len(handlers)} handlers")
-            for handler in handlers:
-                if hasattr(handler, 'callback'):
-                    logger.info(f"    - {handler.callback.__name__}")
-        # --- END OF THE FIX ---
+        if total_handlers == 0:
+            logger.error("❌ Handler registration FAILED even with decorators. The Pyrogram Client Dispatcher is not loading handlers.")
         
         # Setup webhook if URL is provided
         if WEBHOOK_URL:
