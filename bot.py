@@ -13,9 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
 import inspect
-# --- ADDED NECESSARY IMPORTS FOR EXPLICIT HANDLER REGISTRATION ---
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler 
-# ----------------------------------------------------------------
 
 # Set up logging
 logging.basicConfig(
@@ -91,7 +89,7 @@ def get_user_lock(user_id):
 def register_handlers():
     """Register all bot handlers using explicit add_handler"""
     
-    # --- START OF FIX: Explicitly add handlers to the app dispatcher ---
+    # Explicitly add handlers to the app dispatcher
     app.add_handler(MessageHandler(start, filters.private & filters.command("start")))
     app.add_handler(MessageHandler(help_command, filters.private & filters.command("help")))
     app.add_handler(MessageHandler(stats_command, filters.private & filters.command("stats")))
@@ -108,7 +106,6 @@ def register_handlers():
     
     # Video forward handler (added ~filters.media_group for robustness)
     app.add_handler(MessageHandler(auto_forward, filters.private & filters.video & ~filters.forwarded & ~filters.media_group))
-    # --- END OF FIX ---
     
     logger.info("✅ All handlers registered")
 
@@ -1263,6 +1260,9 @@ async def process_update_manually(update_dict):
                 
                 logger.info(f"🔍 Checking {len(app.dispatcher.groups)} handler groups")
                 
+                # Recalculate total handlers here to confirm registration
+                total_handlers_registered = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+                
                 for group in sorted(app.dispatcher.groups.keys()):
                     logger.info(f"📦 Checking group {group} with {len(app.dispatcher.groups[group])} handlers")
                     for handler in app.dispatcher.groups[group]:
@@ -1294,7 +1294,7 @@ async def process_update_manually(update_dict):
                 
                 if not handlers_found:
                     logger.warning(f"⚠️ No handlers matched for message: {message_obj.text}")
-                    logger.warning(f"💡 Total handlers registered: {sum(len(handlers) for handlers in app.dispatcher.groups.values())}")
+                    logger.warning(f"💡 Total handlers registered: {total_handlers_registered}")
                     
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}", exc_info=True)
@@ -1491,24 +1491,28 @@ async def main():
     logger.info("🚀 Starting bot...")
     
     try:
-        # Register all handlers BEFORE starting the app
-        logger.info("📝 Registering handlers...")
-        register_handlers()
-        logger.info("✅ Handler registration complete")
-        
+        # --- START OF THE FIX ---
+        # 1. Start the app first to fully initialize the internal dispatcher
         await app.start()
         
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
-        # Log registered handlers
+        # 2. Register handlers AFTER app.start() is complete
+        logger.info("📝 Registering handlers...")
+        register_handlers()
+        logger.info("✅ Handler registration complete")
+
+        # Log registered handlers (this check should now show handlers > 0)
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
         logger.info(f"📝 Total handlers registered: {total_handlers}")
+        
         for group_id, handlers in app.dispatcher.groups.items():
             logger.info(f"  Group {group_id}: {len(handlers)} handlers")
             for handler in handlers:
                 if hasattr(handler, 'callback'):
                     logger.info(f"    - {handler.callback.__name__}")
+        # --- END OF THE FIX ---
         
         # Setup webhook if URL is provided
         if WEBHOOK_URL:
