@@ -23,6 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot credentials and config
+# WARNING: Replace default empty strings with secure fetching or proper environment checks
 API_ID = int(os.getenv('API_ID', ''))
 API_HASH = os.getenv('API_HASH', '')
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
@@ -42,7 +43,7 @@ ADMIN_IDS = [
 
 # If no admin IDs in environment variable, add them manually here
 if not ADMIN_IDS:
-    ADMIN_IDS = [123456789]  # Replace with your actual Telegram user ID
+    ADMIN_IDS = [123456789]  # REPLACE WITH YOUR ACTUAL TELEGRAM USER ID
 
 logger.info(f"📧 Admin IDs configured: {ADMIN_IDS}")
 logger.info(f"📧 Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not configured (using polling)'}")
@@ -93,11 +94,11 @@ def register_handlers():
         return await start(client, message)
     
     @app.on_message(filters.private & filters.command("help"))
-    async def help_handler(client, message):
+    async def help_command(client, message):
         return await help_command(client, message)
     
     @app.on_message(filters.private & filters.command("stats"))
-    async def stats_handler(client, message):
+    async def stats_command(client, message):
         return await stats_command(client, message)
     
     @app.on_message(filters.private & filters.command("admin"))
@@ -1478,23 +1479,19 @@ async def main():
     
     try:
         # 2. Register all handlers and START the Pyrogram client
+        # THIS IS THE CRITICAL FIX: Handlers must be loaded BEFORE the server starts listening.
         logger.info("📝 Registering handlers...")
         register_handlers()
         logger.info("✅ Handler registration complete")
         
-        await app.start() # <--- Client started and handlers are loaded here
+        await app.start() # <-- Client started and handlers are loaded here
         
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
-        # Log registered handlers
+        # Log registered handlers for confirmation
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
         logger.info(f"📝 Total handlers registered: {total_handlers}")
-        for group_id, handlers in app.dispatcher.groups.items():
-            logger.info(f"  Group {group_id}: {len(handlers)} handlers")
-            for handler in handlers:
-                if hasattr(handler, 'callback'):
-                    logger.info(f"    - {handler.callback.__name__}")
         
         # 3. Setup webhook if URL is provided (using the now-started client)
         if WEBHOOK_URL:
