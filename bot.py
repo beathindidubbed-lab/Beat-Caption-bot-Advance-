@@ -73,9 +73,6 @@ waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
 
-# Web server
-web_app = web.Application()
-
 
 def get_user_lock(user_id):
     """Get or create a lock for a specific user"""
@@ -1513,13 +1510,15 @@ async def main():
         logger.info("📝 Registering handlers...")
         register_handlers()
         logger.info("✅ Handler registration complete")
+
+        # --- FIX: RE-ADDING app.start() is necessary to establish the connection for API calls ---
+        await app.start()
         
-        # --- CRITICAL FIX: Removed 'await app.start()' for manual webhook dispatch ---
-        
+        # Get bot info using Client methods (now works)
         me = await app.get_me()
         logger.info(f"✅ Bot initialized: @{me.username} (ID: {me.id})")
         
-        # Log registered handlers
+        # Log registered handlers (The count will likely still be 0 here, but the handlers ARE registered in the dispatcher)
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
         logger.info(f"📝 Total handlers registered: {total_handlers}")
         for group_id, handlers in app.dispatcher.groups.items():
@@ -1564,8 +1563,9 @@ async def main():
                         json={"drop_pending_updates": False}
                     )
                 logger.info("🗑️ Webhook deleted")
-            # --- CRITICAL FIX: Removed 'await app.stop()' ---
-            # await app.stop() # Removed
+            
+            # --- FIX: Re-add app.stop() for graceful shutdown and session file closure ---
+            await app.stop() 
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         if db_pool:
