@@ -581,7 +581,6 @@ async def help_command(client, message):
     await message.reply(help_text, parse_mode=ParseMode.HTML)
 
 
-@app.on_message(filters.private & filters.command("stats"))
 async def stats_command(client, message):
     try:
         await message.delete()
@@ -610,7 +609,6 @@ async def stats_command(client, message):
     await message.reply(stats_text, parse_mode=ParseMode.HTML)
 
 
-@app.on_message(filters.private & filters.command("admin"))
 async def admin_command(client, message):
     try:
         await message.delete()
@@ -640,7 +638,6 @@ async def admin_command(client, message):
     await message.reply(admin_text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
 
 
-@app.on_callback_query()
 async def handle_buttons(client, callback_query: CallbackQuery):
     try:
         await callback_query.answer()
@@ -895,7 +892,6 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         last_bot_messages[chat_id] = sent.id
 
 
-@app.on_message(filters.private & filters.forwarded)
 async def handle_forwarded(client, message: Message):
     user_id = message.from_user.id
     
@@ -936,7 +932,6 @@ async def handle_forwarded(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
 async def handle_media_for_welcome(client, message: Message):
     user_id = message.from_user.id
     
@@ -980,7 +975,6 @@ async def handle_media_for_welcome(client, message: Message):
             last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & filters.text & ~filters.forwarded)
 async def receive_input(client, message):
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -1076,7 +1070,6 @@ async def receive_input(client, message):
             last_bot_messages[chat_id] = sent.id
 
 
-@app.on_message(filters.private & filters.video)
 async def auto_forward(client, message):
     user_id = message.from_user.id
     
@@ -1486,6 +1479,11 @@ async def main():
     logger.info("🚀 Starting bot...")
     
     try:
+        # Register all handlers BEFORE starting the app
+        logger.info("📝 Registering handlers...")
+        register_handlers()
+        logger.info("✅ Handler registration complete")
+        
         await app.start()
         
         me = await app.get_me()
