@@ -1449,6 +1449,15 @@ async def main():
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
+        # Log registered handlers
+        total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+        logger.info(f"📝 Total handlers registered: {total_handlers}")
+        for group_id, handlers in app.dispatcher.groups.items():
+            logger.info(f"  Group {group_id}: {len(handlers)} handlers")
+            for handler in handlers:
+                if hasattr(handler, 'callback'):
+                    logger.info(f"    - {handler.callback.__name__}")
+        
         # Setup webhook if URL is provided
         if WEBHOOK_URL:
             webhook_success = await setup_webhook()
