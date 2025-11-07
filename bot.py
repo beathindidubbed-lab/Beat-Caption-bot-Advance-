@@ -68,14 +68,54 @@ app = Client(
 
 logger.info(f"📧 Pyrogram Client initialized")
 
+# --- START FIX: HANDLERS MOVED TO GLOBAL SCOPE ---
+
+@app.on_message(filters.private & filters.command("start"))
+async def start_handler(client, message):
+    return await start(client, message)
+
+@app.on_message(filters.private & filters.command("help"))
+async def help_handler(client, message):
+    return await help_command(client, message)
+
+@app.on_message(filters.private & filters.command("stats"))
+async def stats_handler(client, message):
+    return await stats_command(client, message)
+
+@app.on_message(filters.private & filters.command("admin"))
+async def admin_handler(client, message):
+    return await admin_command(client, message)
+
+@app.on_callback_query()
+async def callback_handler(client, callback_query):
+    return await handle_buttons(client, callback_query)
+
+@app.on_message(filters.private & filters.forwarded)
+async def forwarded_handler(client, message):
+    return await handle_forwarded(client, message)
+
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
+async def media_handler(client, message):
+    return await handle_media_for_welcome(client, message)
+
+@app.on_message(filters.private & filters.text & ~filters.forwarded)
+async def text_handler(client, message):
+    return await receive_input(client, message)
+
+@app.on_message(filters.private & filters.video)
+async def video_handler(client, message):
+    return await auto_forward(client, message)
+
+# --- END FIX ---
+
 # Track users waiting for input and last messages
 waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
 
 # Web server
-# Original: web_app = web.Application()
-web_app = None # Set to None for cleaner initialization in start_web_server
+web_app = web.Application()
+
 
 def get_user_lock(user_id):
     """Get or create a lock for a specific user"""
@@ -84,46 +124,9 @@ def get_user_lock(user_id):
     return user_locks[user_id]
 
 
-# Handler registration functions - define all handlers here
+# Handler registration functions - now just a logging function
 def register_handlers():
-    """Register all bot handlers"""
-    
-    @app.on_message(filters.private & filters.command("start"))
-    async def start_handler(client, message):
-        return await start(client, message)
-    
-    @app.on_message(filters.private & filters.command("help"))
-    async def help_handler(client, message):
-        return await help_command(client, message)
-    
-    @app.on_message(filters.private & filters.command("stats"))
-    async def stats_handler(client, message):
-        return await stats_command(client, message)
-    
-    @app.on_message(filters.private & filters.command("admin"))
-    async def admin_handler(client, message):
-        return await admin_command(client, message)
-    
-    @app.on_callback_query()
-    async def callback_handler(client, callback_query):
-        return await handle_buttons(client, callback_query)
-    
-    @app.on_message(filters.private & filters.forwarded)
-    async def forwarded_handler(client, message):
-        return await handle_forwarded(client, message)
-    
-    @app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-    async def media_handler(client, message):
-        return await handle_media_for_welcome(client, message)
-    
-    @app.on_message(filters.private & filters.text & ~filters.forwarded)
-    async def text_handler(client, message):
-        return await receive_input(client, message)
-    
-    @app.on_message(filters.private & filters.video)
-    async def video_handler(client, message):
-        return await auto_forward(client, message)
-    
+    """Register all bot handlers (they are registered via global decorators)"""
     logger.info("✅ All handlers registered")
 
 
@@ -474,7 +477,7 @@ def get_channel_set_markup():
     ])
 
 
-# Handler functions (will be registered in register_handlers())
+# Handler functions (now registered via global decorators)
 async def start(client, message):
     logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
     
@@ -1249,7 +1252,9 @@ async def process_update_manually(update_dict):
                 from pyrogram.handlers import MessageHandler
                 handlers_found = False
                 
-                logger.info(f"🔍 Checking {len(app.dispatcher.groups)} handler groups")
+                # The total number of handlers should now be > 0 because of the fix
+                total_registered_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+                logger.info(f"🔍 Checking {len(app.dispatcher.groups)} handler groups with total {total_registered_handlers} handlers")
                 
                 for group in sorted(app.dispatcher.groups.keys()):
                     logger.info(f"📦 Checking group {group} with {len(app.dispatcher.groups[group])} handlers")
@@ -1282,7 +1287,7 @@ async def process_update_manually(update_dict):
                 
                 if not handlers_found:
                     logger.warning(f"⚠️ No handlers matched for message: {message_obj.text}")
-                    logger.warning(f"💡 Total handlers registered: {sum(len(handlers) for handlers in app.dispatcher.groups.values())}")
+                    logger.warning(f"💡 Total handlers registered: {total_registered_handlers}")
                     
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}", exc_info=True)
@@ -1450,9 +1455,6 @@ async def self_ping():
 
 async def start_web_server():
     global web_app
-    # FIX: Explicitly initialize web_app here to prevent NameError
-    web_app = web.Application()
-    
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
@@ -1483,6 +1485,7 @@ async def main():
     
     try:
         # Register all handlers BEFORE starting the app
+        # The actual handlers are registered globally via decorators, this is just for logging
         logger.info("📝 Registering handlers...")
         register_handlers()
         logger.info("✅ Handler registration complete")
