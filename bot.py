@@ -84,47 +84,47 @@ def get_user_lock(user_id):
     return user_locks[user_id]
 
 
-# Handler registration functions - define all handlers here
-def register_handlers():
-    """Register all bot handlers"""
-    
-    @app.on_message(filters.private & filters.command("start"))
-    async def start_handler(client, message):
-        return await start(client, message)
-    
-    @app.on_message(filters.private & filters.command("help"))
-    async def help_handler(client, message):
-        return await help_command(client, message)
-    
-    @app.on_message(filters.private & filters.command("stats"))
-    async def stats_handler(client, message):
-        return await stats_command(client, message)
-    
-    @app.on_message(filters.private & filters.command("admin"))
-    async def admin_handler(client, message):
-        return await admin_command(client, message)
-    
-    @app.on_callback_query()
-    async def callback_handler(client, callback_query):
-        return await handle_buttons(client, callback_query)
-    
-    @app.on_message(filters.private & filters.forwarded)
-    async def forwarded_handler(client, message):
-        return await handle_forwarded(client, message)
-    
-    @app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-    async def media_handler(client, message):
-        return await handle_media_for_welcome(client, message)
-    
-    @app.on_message(filters.private & filters.text & ~filters.forwarded)
-    async def text_handler(client, message):
-        return await receive_input(client, message)
-    
-    @app.on_message(filters.private & filters.video)
-    async def video_handler(client, message):
-        return await auto_forward(client, message)
-    
-    logger.info("✅ All handlers registered")
+# -----------------------------------------------
+# CORRECTED HANDLER REGISTRATION (TOP-LEVEL SCOPE)
+# -----------------------------------------------
+@app.on_message(filters.private & filters.command("start"))
+async def start_handler(client, message):
+    return await start(client, message)
+
+@app.on_message(filters.private & filters.command("help"))
+async def help_handler(client, message):
+    return await help_command(client, message)
+
+@app.on_message(filters.private & filters.command("stats"))
+async def stats_handler(client, message):
+    return await stats_command(client, message)
+
+@app.on_message(filters.private & filters.command("admin"))
+async def admin_handler(client, message):
+    return await admin_command(client, message)
+
+@app.on_callback_query()
+async def callback_handler(client, callback_query):
+    return await handle_buttons(client, callback_query)
+
+@app.on_message(filters.private & filters.forwarded)
+async def forwarded_handler(client, message):
+    return await handle_forwarded(client, message)
+
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
+async def media_handler(client, message):
+    return await handle_media_for_welcome(client, message)
+
+@app.on_message(filters.private & filters.text & ~filters.forwarded)
+async def text_handler(client, message):
+    return await receive_input(client, message)
+
+@app.on_message(filters.private & filters.video)
+async def video_handler(client, message):
+    return await auto_forward(client, message)
+
+logger.info("✅ All handlers registered")
+# -----------------------------------------------
 
 
 async def init_db():
@@ -972,7 +972,7 @@ async def handle_media_for_welcome(client, message: Message):
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_admin_menu_markup()
             )
-            last_bot_messages[chat_id] = sent.id
+            last_bot_messages[message.chat.id] = sent.id
 
 
 async def receive_input(client, message):
@@ -1249,6 +1249,7 @@ async def process_update_manually(update_dict):
                 from pyrogram.handlers import MessageHandler
                 handlers_found = False
                 
+                # The groups property now correctly holds registered handlers
                 logger.info(f"🔍 Checking {len(app.dispatcher.groups)} handler groups")
                 
                 for group in sorted(app.dispatcher.groups.keys()):
@@ -1479,10 +1480,8 @@ async def main():
     logger.info("🚀 Starting bot...")
     
     try:
-        # Register all handlers BEFORE starting the app
-        logger.info("📝 Registering handlers...")
-        register_handlers()
-        logger.info("✅ Handler registration complete")
+        # Handlers are now registered at the module's top level (around line 98)
+        # We no longer need to call a registration function here.
         
         await app.start()
         
