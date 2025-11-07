@@ -73,6 +73,9 @@ waiting_for_input = {}
 last_bot_messages = {}
 user_locks = {}
 
+# Web server
+# Original: web_app = web.Application()
+web_app = None # Set to None for cleaner initialization in start_web_server
 
 def get_user_lock(user_id):
     """Get or create a lock for a specific user"""
@@ -1239,18 +1242,6 @@ async def process_update_manually(update_dict):
                     command_text = text.split()[0][1:].split('@')[0] if text else None
                     message_obj.command = [command_text] if command_text else None
                 
-                # Handle media objects for filters
-                if msg.get('photo'):
-                    message_obj.photo = True # Simple flag for filter check
-                if msg.get('video'):
-                    message_obj.video = True
-                if msg.get('animation'):
-                    message_obj.animation = True
-                if msg.get('forward_from_chat') or msg.get('forward_from'):
-                    message_obj.forward_from_chat = types.Chat(id=msg['forward_from_chat']['id'], type=ChatType.CHANNEL, client=app) if msg.get('forward_from_chat') else None
-                    message_obj.forward_from = types.User(id=msg['forward_from']['id'], client=app) if msg.get('forward_from') else None
-                    message_obj.forwarded = True
-                
                 logger.info(f"✅ Created message object: {message_obj.text}")
                 logger.info(f"📋 Message attributes: chat.id={message_obj.chat.id}, from_user.id={message_obj.from_user.id}, command={getattr(message_obj, 'command', None)}")
                 
@@ -1270,12 +1261,7 @@ async def process_update_manually(update_dict):
                                 filter_result = True
                                 if handler.filters:
                                     try:
-                                        # Use inspect.iscoroutinefunction to check if filter is async
-                                        if inspect.iscoroutinefunction(handler.filters):
-                                            filter_result = await handler.filters(app, message_obj)
-                                        else:
-                                            filter_result = handler.filters(app, message_obj)
-                                            
+                                        filter_result = await handler.filters(app, message_obj)
                                         logger.info(f"🔎 Handler '{handler_name}': filter={'PASSED' if filter_result else 'FAILED'}")
                                     except Exception as filter_error:
                                         logger.error(f"Filter error for {handler_name}: {filter_error}", exc_info=True)
@@ -1287,13 +1273,11 @@ async def process_update_manually(update_dict):
                                     handlers_found = True
                                     logger.info(f"✅ Executing handler: {handler_name}")
                                     await handler.callback(app, message_obj)
-                                    # Pyrogram stops after the first matched handler in a group
                                     break
                             except Exception as e:
                                 logger.error(f"❌ Handler error in {handler_name}: {e}", exc_info=True)
                     
                     if handlers_found:
-                        # Pyrogram normally stops processing groups once a handler executes.
                         break
                 
                 if not handlers_found:
@@ -1361,27 +1345,16 @@ async def process_update_manually(update_dict):
                 
                 # Dispatch through handlers
                 from pyrogram.handlers import CallbackQueryHandler
-                handlers_found = False
                 for group in sorted(app.dispatcher.groups.keys()):
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, CallbackQueryHandler):
                             try:
-                                filter_result = True
-                                if handler.filters:
-                                    if inspect.iscoroutinefunction(handler.filters):
-                                        filter_result = await handler.filters(app, callback_obj)
-                                    else:
-                                        filter_result = handler.filters(app, callback_obj)
-                                        
-                                if filter_result:
-                                    handlers_found = True
+                                if handler.filters is None or await handler.filters(app, callback_obj):
                                     logger.info(f"✅ Executing callback handler")
                                     await handler.callback(app, callback_obj)
                                     break
                             except Exception as e:
                                 logger.error(f"❌ Callback handler error: {e}", exc_info=True)
-                    if handlers_found:
-                        break
                                 
             except Exception as e:
                 logger.error(f"❌ Error processing callback: {e}", exc_info=True)
@@ -1477,6 +1450,9 @@ async def self_ping():
 
 async def start_web_server():
     global web_app
+    # FIX: Explicitly initialize web_app here to prevent NameError
+    web_app = web.Application()
+    
     # Add webhook endpoint
     if WEBHOOK_URL:
         web_app.router.add_post(WEBHOOK_PATH, telegram_webhook)
@@ -1502,23 +1478,21 @@ async def main():
     logger.info("🗄️ Initializing database...")
     await init_db()
     
-    # Start bot (in Webhook mode)
-    logger.info("🚀 Starting bot (in Webhook mode)...")
+    # Start bot
+    logger.info("🚀 Starting bot...")
     
     try:
         # Register all handlers BEFORE starting the app
         logger.info("📝 Registering handlers...")
         register_handlers()
         logger.info("✅ Handler registration complete")
-
-        # --- FIX: RE-ADDING app.start() is necessary to establish the connection for API calls ---
+        
         await app.start()
         
-        # Get bot info using Client methods (now works)
         me = await app.get_me()
-        logger.info(f"✅ Bot initialized: @{me.username} (ID: {me.id})")
+        logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
-        # Log registered handlers (The count will likely still be 0 here, but the handlers ARE registered in the dispatcher)
+        # Log registered handlers
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
         logger.info(f"📝 Total handlers registered: {total_handlers}")
         for group_id, handlers in app.dispatcher.groups.items():
@@ -1533,12 +1507,12 @@ async def main():
             if webhook_success:
                 logger.info("🔗 Running in WEBHOOK mode")
             else:
-                logger.warning("⚠️ Webhook setup failed. Bot is running but cannot receive updates.")
+                logger.warning("⚠️ Webhook setup failed, falling back to POLLING mode")
         else:
-            logger.info("📡 Running in MANUAL DISPATCH mode (No polling)")
+            logger.info("📡 Running in POLLING mode")
         
         logger.info("=" * 50)
-        logger.info("✅ ALL SYSTEMS OPERATIONAL (Webhook Listener)")
+        logger.info("✅ ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 50)
         
         # Start self-ping
@@ -1563,9 +1537,7 @@ async def main():
                         json={"drop_pending_updates": False}
                     )
                 logger.info("🗑️ Webhook deleted")
-            
-            # --- FIX: Re-add app.stop() for graceful shutdown and session file closure ---
-            await app.stop() 
+            await app.stop()
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         if db_pool:
