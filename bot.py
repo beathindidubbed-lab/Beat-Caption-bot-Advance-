@@ -3,6 +3,7 @@ import json
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler # <--- NEW IMPORT
 from pathlib import Path
 import asyncio
 import os
@@ -85,47 +86,52 @@ def get_user_lock(user_id):
     return user_locks[user_id]
 
 
-# Handler registration functions - define all handlers here
+# Handler registration function (FIXED)
 def register_handlers():
-    """Register all bot handlers"""
+    """Register all bot handlers explicitly using app.add_handler()"""
     
-    @app.on_message(filters.private & filters.command("start"))
-    async def start_handler(client, message):
-        return await start(client, message)
+    # Use explicit handlers to ensure registration persists across app.start()
+    app.add_handler(
+        MessageHandler(start, filters.private & filters.command("start"))
+    )
     
-    @app.on_message(filters.private & filters.command("help"))
-    async def help_command(client, message):
-        return await help_command(client, message)
+    app.add_handler(
+        MessageHandler(help_command, filters.private & filters.command("help"))
+    )
     
-    @app.on_message(filters.private & filters.command("stats"))
-    async def stats_command(client, message):
-        return await stats_command(client, message)
+    app.add_handler(
+        MessageHandler(stats_command, filters.private & filters.command("stats"))
+    )
     
-    @app.on_message(filters.private & filters.command("admin"))
-    async def admin_handler(client, message):
-        return await admin_command(client, message)
+    app.add_handler(
+        MessageHandler(admin_command, filters.private & filters.command("admin"))
+    )
     
-    @app.on_callback_query()
-    async def callback_handler(client, callback_query):
-        return await handle_buttons(client, callback_query)
+    app.add_handler(
+        CallbackQueryHandler(handle_buttons)
+    )
     
-    @app.on_message(filters.private & filters.forwarded)
-    async def forwarded_handler(client, message):
-        return await handle_forwarded(client, message)
+    app.add_handler(
+        MessageHandler(handle_forwarded, filters.private & filters.forwarded)
+    )
     
-    @app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-    async def media_handler(client, message):
-        return await handle_media_for_welcome(client, message)
+    app.add_handler(
+        MessageHandler(handle_media_for_welcome, filters.private & (filters.photo | filters.video | filters.animation))
+    )
     
-    @app.on_message(filters.private & filters.text & ~filters.forwarded)
-    async def text_handler(client, message):
-        return await receive_input(client, message)
+    # The auto_forward (video) handler should run after the media_for_welcome handler 
+    # (they share the filters.video filter, so order matters within the default group)
+    app.add_handler(
+        MessageHandler(auto_forward, filters.private & filters.video)
+    )
     
-    @app.on_message(filters.private & filters.video)
-    async def video_handler(client, message):
-        return await auto_forward(client, message)
+    # The generic text handler must be last to allow commands and specialized text filters to run first
+    app.add_handler(
+        MessageHandler(receive_input, filters.private & filters.text & ~filters.forwarded)
+    )
     
-    logger.info("✅ All handlers registered")
+    total_registered = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+    logger.info(f"✅ All handlers registered. Verified count: {total_registered}")
 
 
 async def init_db():
@@ -475,7 +481,7 @@ def get_channel_set_markup():
     ])
 
 
-# Handler functions (will be registered in register_handlers())
+# Handler functions (will be registered explicitly)
 async def start(client, message):
     logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
     
@@ -1276,7 +1282,11 @@ async def process_update_manually(update_dict):
                                     handlers_found = True
                                     logger.info(f"✅ Executing handler: {handler_name}")
                                     await handler.callback(app, message_obj)
-                                    break
+                                    # IMPORTANT: Since `receive_input` is a catch-all, we should allow
+                                    # other handlers to run unless it's a command. However, for a simple bot
+                                    # structure, running the first match is often the expectation.
+                                    # Since we explicitly added handlers, the order is now deterministic.
+                                    break 
                             except Exception as e:
                                 logger.error(f"❌ Handler error in {handler_name}: {e}", exc_info=True)
                     
@@ -1478,20 +1488,19 @@ async def main():
     logger.info("🚀 Starting bot...")
     
     try:
-        # 2. Register all handlers and START the Pyrogram client
-        # THIS IS THE CRITICAL FIX: Handlers must be loaded BEFORE the server starts listening.
+        # 2. Register all handlers explicitly
         logger.info("📝 Registering handlers...")
         register_handlers()
         logger.info("✅ Handler registration complete")
         
-        await app.start() # <-- Client started and handlers are loaded here
+        await app.start() # <-- Client started, handlers should now be persistent
         
         me = await app.get_me()
         logger.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         
-        # Log registered handlers for confirmation
+        # Log registered handlers for final confirmation post-start
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
-        logger.info(f"📝 Total handlers registered: {total_handlers}")
+        logger.info(f"📝 Total handlers verified after start: {total_handlers}")
         
         # 3. Setup webhook if URL is provided (using the now-started client)
         if WEBHOOK_URL:
@@ -1544,4 +1553,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Ensure all code outside of main runs before asyncio.run
     asyncio.run(main())
