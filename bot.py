@@ -84,6 +84,49 @@ def get_user_lock(user_id):
     return user_locks[user_id]
 
 
+# Handler registration functions - define all handlers here
+def register_handlers():
+    """Register all bot handlers"""
+    
+    @app.on_message(filters.private & filters.command("start"))
+    async def start_handler(client, message):
+        return await start(client, message)
+    
+    @app.on_message(filters.private & filters.command("help"))
+    async def help_handler(client, message):
+        return await help_command(client, message)
+    
+    @app.on_message(filters.private & filters.command("stats"))
+    async def stats_handler(client, message):
+        return await stats_command(client, message)
+    
+    @app.on_message(filters.private & filters.command("admin"))
+    async def admin_handler(client, message):
+        return await admin_command(client, message)
+    
+    @app.on_callback_query()
+    async def callback_handler(client, callback_query):
+        return await handle_buttons(client, callback_query)
+    
+    @app.on_message(filters.private & filters.forwarded)
+    async def forwarded_handler(client, message):
+        return await handle_forwarded(client, message)
+    
+    @app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
+    async def media_handler(client, message):
+        return await handle_media_for_welcome(client, message)
+    
+    @app.on_message(filters.private & filters.text & ~filters.forwarded)
+    async def text_handler(client, message):
+        return await receive_input(client, message)
+    
+    @app.on_message(filters.private & filters.video)
+    async def video_handler(client, message):
+        return await auto_forward(client, message)
+    
+    logger.info("✅ All handlers registered")
+
+
 async def init_db():
     """Initialize PostgreSQL database"""
     global db_pool
@@ -431,7 +474,7 @@ def get_channel_set_markup():
     ])
 
 
-@app.on_message(filters.private & filters.command("start"))
+# Handler functions (will be registered in register_handlers())
 async def start(client, message):
     logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
     
@@ -513,7 +556,6 @@ async def start(client, message):
     last_bot_messages[message.chat.id] = sent.id
 
 
-@app.on_message(filters.private & filters.command("help"))
 async def help_command(client, message):
     try:
         await message.delete()
