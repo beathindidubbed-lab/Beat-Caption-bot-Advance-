@@ -13,6 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
 import logging
 import inspect
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler # ADDED THIS
 
 # Set up logging
 logging.basicConfig(
@@ -68,46 +69,6 @@ app = Client(
 
 logger.info(f"📧 Pyrogram Client initialized")
 
-# --- START FIX: HANDLERS MOVED TO GLOBAL SCOPE ---
-
-@app.on_message(filters.private & filters.command("start"))
-async def start_handler(client, message):
-    return await start(client, message)
-
-@app.on_message(filters.private & filters.command("help"))
-async def help_handler(client, message):
-    return await help_command(client, message)
-
-@app.on_message(filters.private & filters.command("stats"))
-async def stats_handler(client, message):
-    return await stats_command(client, message)
-
-@app.on_message(filters.private & filters.command("admin"))
-async def admin_handler(client, message):
-    return await admin_command(client, message)
-
-@app.on_callback_query()
-async def callback_handler(client, callback_query):
-    return await handle_buttons(client, callback_query)
-
-@app.on_message(filters.private & filters.forwarded)
-async def forwarded_handler(client, message):
-    return await handle_forwarded(client, message)
-
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-async def media_handler(client, message):
-    return await handle_media_for_welcome(client, message)
-
-@app.on_message(filters.private & filters.text & ~filters.forwarded)
-async def text_handler(client, message):
-    return await receive_input(client, message)
-
-@app.on_message(filters.private & filters.video)
-async def video_handler(client, message):
-    return await auto_forward(client, message)
-
-# --- END FIX ---
-
 # Track users waiting for input and last messages
 waiting_for_input = {}
 last_bot_messages = {}
@@ -123,14 +84,76 @@ def get_user_lock(user_id):
         user_locks[user_id] = asyncio.Lock()
     return user_locks[user_id]
 
+# --- START FIX: EXPLICIT HANDLER REGISTRATION ---
 
-# Handler registration functions - now just a logging function
+# Handler registration function (Now explicitly registers all handlers)
 def register_handlers():
-    """Register all bot handlers (they are registered via global decorators)"""
+    """Register all bot handlers explicitly via add_handler"""
+    
+    # --------------------------------------------------------------------------------
+    # 1. Define Handler Wrapper Functions (these call the logic functions below)
+    # --------------------------------------------------------------------------------
+    async def start_handler(client, message):
+        return await start(client, message)
+
+    async def help_handler(client, message):
+        return await help_command(client, message)
+
+    async def stats_handler(client, message):
+        return await stats_command(client, message)
+
+    async def admin_handler(client, message):
+        return await admin_command(client, message)
+
+    async def callback_handler(client, callback_query):
+        return await handle_buttons(client, callback_query)
+
+    async def forwarded_handler(client, message):
+        return await handle_forwarded(client, message)
+
+    async def media_handler(client, message):
+        return await handle_media_for_welcome(client, message)
+
+    async def text_handler(client, message):
+        return await receive_input(client, message)
+
+    async def video_handler(client, message):
+        return await auto_forward(client, message)
+        
+    # --------------------------------------------------------------------------------
+    # 2. Explicitly add handlers to the dispatcher with groups for execution order
+    # --------------------------------------------------------------------------------
+    # Group 0: Commands
+    app.add_handler(MessageHandler(start_handler, filters.private & filters.command("start")), group=0)
+    app.add_handler(MessageHandler(help_handler, filters.private & filters.command("help")), group=0)
+    app.add_handler(MessageHandler(stats_handler, filters.private & filters.command("stats")), group=0)
+    app.add_handler(MessageHandler(admin_handler, filters.private & filters.command("admin")), group=0)
+    
+    # Group 1: Callback Queries
+    app.add_handler(CallbackQueryHandler(callback_handler), group=1)
+    
+    # Group 2: Specific Message Types (Forwarded, Media)
+    app.add_handler(MessageHandler(forwarded_handler, filters.private & filters.forwarded), group=2)
+    
+    # Handle media for welcome message setting. Must run before auto_forward.
+    app.add_handler(MessageHandler(media_handler, filters.private & (filters.photo | filters.video | filters.animation)), group=3)
+    
+    # Handle video for auto-forward. Must run after media_handler to check for input flag.
+    # We exclude forwarded messages as they are handled above.
+    app.add_handler(MessageHandler(video_handler, filters.private & filters.video & ~filters.forwarded), group=4)
+    
+    # Group 5: General Text Input (Lowest Priority)
+    app.add_handler(MessageHandler(text_handler, filters.private & filters.text & ~filters.forwarded), group=5)
+    
     logger.info("✅ All handlers registered")
+
+# --- END FIX ---
+
+# The logic functions (start, help_command, stats_command, etc.) follow here...
 
 
 async def init_db():
+    # ... (Database initialization code remains the same) ...
     """Initialize PostgreSQL database"""
     global db_pool
     if DATABASE_URL:
@@ -217,6 +240,7 @@ async def init_db():
 
 
 async def get_user_settings(user_id, username=None, first_name=None):
+    # ... (get_user_settings code remains the same) ...
     """Load settings for a specific user"""
     if db_pool:
         try:
@@ -282,6 +306,7 @@ async def get_user_settings(user_id, username=None, first_name=None):
 
 
 async def save_user_settings(settings):
+    # ... (save_user_settings code remains the same) ...
     """Save user settings"""
     user_id = settings['user_id']
     
@@ -311,6 +336,7 @@ async def save_user_settings(settings):
 
 
 async def log_upload(user_id, season, episode, total_episode, quality, file_id, caption, target_chat_id):
+    # ... (log_upload code remains the same) ...
     """Log upload to database"""
     if db_pool:
         try:
@@ -327,6 +353,7 @@ async def log_upload(user_id, season, episode, total_episode, quality, file_id, 
 
 
 async def save_channel_info(user_id, chat_id, username, title, chat_type):
+    # ... (save_channel_info code remains the same) ...
     """Save channel info"""
     if db_pool:
         try:
@@ -347,6 +374,7 @@ async def save_channel_info(user_id, chat_id, username, title, chat_type):
 
 
 async def get_user_upload_stats(user_id):
+    # ... (get_user_upload_stats code remains the same) ...
     """Get upload statistics"""
     if db_pool:
         try:
@@ -370,6 +398,7 @@ async def get_user_upload_stats(user_id):
 
 
 async def get_all_users_count():
+    # ... (get_all_users_count code remains the same) ...
     """Get total users"""
     if db_pool:
         try:
@@ -385,6 +414,7 @@ async def get_all_users_count():
 
 
 async def get_welcome_message():
+    # ... (get_welcome_message code remains the same) ...
     """Get welcome message"""
     if db_pool:
         try:
@@ -406,6 +436,7 @@ async def get_welcome_message():
 
 
 async def save_welcome_message(message_type, file_id, caption):
+    # ... (save_welcome_message code remains the same) ...
     """Save welcome message"""
     if db_pool:
         try:
@@ -424,6 +455,7 @@ async def save_welcome_message(message_type, file_id, caption):
 
 
 async def delete_last_message(client, chat_id):
+    # ... (delete_last_message code remains the same) ...
     """Delete the last bot message"""
     if chat_id in last_bot_messages:
         try:
@@ -434,6 +466,7 @@ async def delete_last_message(client, chat_id):
 
 
 def get_menu_markup():
+    # ... (get_menu_markup code remains the same) ...
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Preview Caption", callback_data="preview")],
         [InlineKeyboardButton("✏️ Set Caption", callback_data="set_caption")],
@@ -451,6 +484,7 @@ def get_menu_markup():
 
 
 def get_admin_menu_markup():
+    # ... (get_admin_menu_markup code remains the same) ...
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Set Welcome Message", callback_data="admin_set_welcome")],
         [InlineKeyboardButton("👁️ Preview Welcome", callback_data="admin_preview_welcome")],
@@ -460,6 +494,7 @@ def get_admin_menu_markup():
 
 
 def get_quality_markup(selected_qualities):
+    # ... (get_quality_markup code remains the same) ...
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(
             f"{'✅ ' if q in selected_qualities else ''}{q}",
@@ -470,6 +505,7 @@ def get_quality_markup(selected_qualities):
 
 
 def get_channel_set_markup():
+    # ... (get_channel_set_markup code remains the same) ...
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Forward Message", callback_data="forward_channel")],
         [InlineKeyboardButton("🔗 Send Username/ID", callback_data="send_channel_id")],
@@ -477,8 +513,10 @@ def get_channel_set_markup():
     ])
 
 
-# Handler functions (now registered via global decorators)
+# Handler functions (logic functions)
+
 async def start(client, message):
+    # ... (start function code remains the same) ...
     logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
     
     user_id = message.from_user.id
@@ -560,6 +598,7 @@ async def start(client, message):
 
 
 async def help_command(client, message):
+    # ... (help_command function code remains the same) ...
     try:
         await message.delete()
     except:
@@ -585,6 +624,7 @@ async def help_command(client, message):
 
 
 async def stats_command(client, message):
+    # ... (stats_command function code remains the same) ...
     try:
         await message.delete()
     except:
@@ -613,6 +653,7 @@ async def stats_command(client, message):
 
 
 async def admin_command(client, message):
+    # ... (admin_command function code remains the same) ...
     try:
         await message.delete()
     except:
@@ -642,6 +683,7 @@ async def admin_command(client, message):
 
 
 async def handle_buttons(client, callback_query: CallbackQuery):
+    # ... (handle_buttons function code remains the same) ...
     try:
         await callback_query.answer()
     except:
@@ -896,6 +938,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
 
 
 async def handle_forwarded(client, message: Message):
+    # ... (handle_forwarded function code remains the same) ...
     user_id = message.from_user.id
     
     if user_id in waiting_for_input and waiting_for_input[user_id] == "forward_channel":
@@ -936,6 +979,7 @@ async def handle_forwarded(client, message: Message):
 
 
 async def handle_media_for_welcome(client, message: Message):
+    # ... (handle_media_for_welcome function code remains the same) ...
     user_id = message.from_user.id
     
     # Only process if admin is setting welcome message
@@ -979,6 +1023,7 @@ async def handle_media_for_welcome(client, message: Message):
 
 
 async def receive_input(client, message):
+    # ... (receive_input function code remains the same) ...
     user_id = message.from_user.id
     chat_id = message.chat.id
 
@@ -1074,6 +1119,7 @@ async def receive_input(client, message):
 
 
 async def auto_forward(client, message):
+    # ... (auto_forward function code remains the same) ...
     user_id = message.from_user.id
     
     # Ignore if waiting for input
@@ -1149,6 +1195,7 @@ async def auto_forward(client, message):
 
 
 async def telegram_webhook(request):
+    # ... (telegram_webhook function code remains the same) ...
     """Handle incoming webhook updates from Telegram"""
     try:
         update_dict = await request.json()
@@ -1166,6 +1213,7 @@ async def telegram_webhook(request):
 
 
 async def process_update_manually(update_dict):
+    # ... (process_update_manually function code remains the same) ...
     """Process updates from webhook using Pyrogram's internal methods"""
     try:
         # Import Telegram raw types for conversion
@@ -1249,7 +1297,7 @@ async def process_update_manually(update_dict):
                 logger.info(f"📋 Message attributes: chat.id={message_obj.chat.id}, from_user.id={message_obj.from_user.id}, command={getattr(message_obj, 'command', None)}")
                 
                 # Now dispatch through handlers
-                from pyrogram.handlers import MessageHandler
+                
                 handlers_found = False
                 
                 # The total number of handlers should now be > 0 because of the fix
@@ -1349,7 +1397,7 @@ async def process_update_manually(update_dict):
                 logger.info(f"✅ Created callback object: {callback_obj.data}")
                 
                 # Dispatch through handlers
-                from pyrogram.handlers import CallbackQueryHandler
+                
                 for group in sorted(app.dispatcher.groups.keys()):
                     for handler in app.dispatcher.groups[group]:
                         if isinstance(handler, CallbackQueryHandler):
@@ -1369,11 +1417,13 @@ async def process_update_manually(update_dict):
 
 
 async def health_check(request):
+    # ... (health_check function code remains the same) ...
     total_users = await get_all_users_count()
     return web.Response(text=f"Bot running! Users: {total_users}", content_type='text/plain')
 
 
 async def stats_endpoint(request):
+    # ... (stats_endpoint function code remains the same) ...
     total_users = await get_all_users_count()
     return web.json_response({
         'status': 'running',
@@ -1384,6 +1434,7 @@ async def stats_endpoint(request):
 
 
 async def setup_webhook():
+    # ... (setup_webhook function code remains the same) ...
     """Set up Telegram webhook"""
     if not WEBHOOK_URL:
         logger.warning("⚠️ WEBHOOK_URL not set, using polling mode")
@@ -1441,6 +1492,7 @@ async def setup_webhook():
 
 
 async def self_ping():
+    # ... (self_ping function code remains the same) ...
     await asyncio.sleep(60)
     while True:
         await asyncio.sleep(600)
@@ -1454,6 +1506,7 @@ async def self_ping():
 
 
 async def start_web_server():
+    # ... (start_web_server function code remains the same) ...
     global web_app
     # Add webhook endpoint
     if WEBHOOK_URL:
@@ -1472,6 +1525,7 @@ async def start_web_server():
 
 
 async def main():
+    # ... (main function code remains the same) ...
     # Start web server
     logger.info("🌐 Starting web server...")
     await start_web_server()
@@ -1485,7 +1539,6 @@ async def main():
     
     try:
         # Register all handlers BEFORE starting the app
-        # The actual handlers are registered globally via decorators, this is just for logging
         logger.info("📝 Registering handlers...")
         register_handlers()
         logger.info("✅ Handler registration complete")
