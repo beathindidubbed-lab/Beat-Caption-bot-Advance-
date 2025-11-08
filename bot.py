@@ -8,6 +8,7 @@ import asyncio
 import os
 from aiohttp import web
 import aiohttp
+import httpx # <--- ADDED: Needed for self_ping function
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
@@ -31,10 +32,7 @@ PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 
-# VVVV CRITICAL FIX 1: Add Polling Override Flag VVVV
-FORCE_POLLING = os.getenv('FORCE_POLLING', '').lower() in ('true', '1', 'yes')
-
-# Webhook configuration
+# Webhook configuration (Not used in this Polling Fix, but kept for completeness)
 WEBHOOK_HOST = RENDER_EXTERNAL_URL.replace('https://', '').replace('http://', '') if RENDER_EXTERNAL_URL else ''
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else ''
@@ -542,14 +540,16 @@ async def help_command(client, message):
         "• Use forward method to easily get channel ID\n"
         "• Preview caption before uploading\n"
         "• Each user has independent settings\n\n"
-        "❓ <b>Need Help?..." # Truncated by original file content.
+        "❓ <b>Need Help?</b>\n"
+        "Contact..."
     )
     
+    await delete_last_message(client, message.chat.id)
     sent = await client.send_message(
         message.chat.id,
         help_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=get_menu_markup()
+        reply_markup=get_menu_markup() if message.from_user.id not in ADMIN_IDS else get_admin_menu_markup()
     )
     last_bot_messages[message.chat.id] = sent.id
 
@@ -559,15 +559,17 @@ async def stats_command(client, message):
     user_id = message.from_user.id
     settings = await get_user_settings(user_id)
     total, today = await get_user_upload_stats(user_id)
-    channel_status = "✅ Set" if settings['target_chat_id'] else "❌ Not Set"
     
     try:
         await message.delete()
     except:
         pass
+        
     await delete_last_message(client, message.chat.id)
-
-    stats_text = (
+    
+    channel_status = "✅ Set" if settings['target_chat_id'] else "❌ Not Set"
+    sent = await client.send_message(
+        message.chat.id,
         f"📊 <b>Your Statistics</b>\n\n"
         f"👤 User ID: <code>{user_id}</code>\n\n"
         f"📤 <b>Uploads:</b>\n"
@@ -577,12 +579,7 @@ async def stats_command(client, message):
         f"• Season: <code>{settings['season']}</code>\n"
         f"• Episode: <code>{settings['episode']}</code>\n"
         f"• Total Episodes: <code>{settings['total_episode']}</code>\n\n"
-        f"🎯 <b>Channel:</b> {channel_status}"
-    )
-
-    sent = await client.send_message(
-        message.chat.id,
-        stats_text,
+        f"🎯 <b>Channel:</b> {channel_status}",
         parse_mode=ParseMode.HTML,
         reply_markup=get_menu_markup()
     )
@@ -592,30 +589,366 @@ async def stats_command(client, message):
 @app.on_message(filters.private & filters.command("admin"))
 async def admin_command(client, message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.reply("❌ Access Denied: You are not an administrator.")
+        await message.reply("❌ **Access Denied**. You are not an admin.")
         return
         
     try:
         await message.delete()
     except:
         pass
+        
     await delete_last_message(client, message.chat.id)
-    
-    total_users = await get_all_users_count()
-    
-    admin_text = (
-        "👑 <b>Admin Panel</b>\n\n"
-        f"Total Users: <code>{total_users}</code>\n\n"
-        "Use the buttons below to manage global bot settings."
-    )
     
     sent = await client.send_message(
         message.chat.id,
-        admin_text,
+        "👑 **Admin Panel**\n\nWelcome, Admin. Use the buttons below to manage global settings.",
         parse_mode=ParseMode.HTML,
         reply_markup=get_admin_menu_markup()
     )
     last_bot_messages[message.chat.id] = sent.id
+
+
+@app.on_message(filters.private & (filters.text | filters.sticker) & filters.incoming & ~filters.command("start") & ~filters.command("help") & ~filters.command("stats") & ~filters.command("admin"))
+async def handle_user_input(client, message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    input_type = waiting_for_input.get(user_id)
+
+    if not input_type:
+        return # Ignore non-command text if not waiting for input
+        
+    try:
+        await message.delete()
+    except:
+        pass
+        
+    await delete_last_message(client, message.chat.id)
+    
+    settings = await get_user_settings(user_id)
+
+    async with get_user_lock(user_id):
+        if input_type == "caption":
+            if message.text:
+                settings["base_caption"] = message.text
+                await save_user_settings(settings)
+                del waiting_for_input[user_id]
+                sent = await client.send_message(chat_id, "✅ Caption template updated!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
+                last_bot_messages[chat_id] = sent.id
+            else:
+                sent = await client.send_message(chat_id, "❌ Please enter a valid text caption.", parse_mode=ParseMode.HTML)
+                last_bot_messages[chat_id] = sent.id
+                
+        elif input_type == "season":
+            if message.text and message.text.isdigit() and int(message.text) > 0:
+                settings["season"] = int(message.text)
+                await save_user_settings(settings)
+                del waiting_for_input[user_id]
+                sent = await client.send_message(chat_id, f"✅ Season updated to {settings['season']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
+                last_bot_messages[chat_id] = sent.id
+            else:
+                sent = await client.send_message(chat_id, "❌ Please enter a valid number greater than 0.", parse_mode=ParseMode.HTML)
+                last_bot_messages[chat_id] = sent.id
+
+        elif input_type == "episode":
+            if message.text and message.text.isdigit() and int(message.text) > 0:
+                settings["episode"] = int(message.text)
+                settings["video_count"] = 0 # Reset video count when episode is manually set
+                await save_user_settings(settings)
+                del waiting_for_input[user_id]
+                sent = await client.send_message(chat_id, f"✅ Episode updated to {settings['episode']}! Video count reset.", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
+                last_bot_messages[chat_id] = sent.id
+            else:
+                sent = await client.send_message(chat_id, "❌ Please enter a valid number greater than 0.", parse_mode=ParseMode.HTML)
+                last_bot_messages[chat_id] = sent.id
+
+        elif input_type == "total_episode":
+            if message.text and message.text.isdigit() and int(message.text) > 0:
+                settings["total_episode"] = int(message.text)
+                await save_user_settings(settings)
+                del waiting_for_input[user_id]
+                sent = await client.send_message(chat_id, f"✅ Total episode updated to {settings['total_episode']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
+                last_bot_messages[chat_id] = sent.id
+            else:
+                sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
+                last_bot_messages[chat_id] = sent.id
+
+        elif input_type == "channel_id":
+            text = message.text.strip()
+            try:
+                if text.startswith('@'):
+                    chat = await client.get_chat(text)
+                elif text.lstrip('-').isdigit():
+                    chat = await client.get_chat(int(text))
+                else:
+                    raise ValueError("Invalid format")
+                
+                # Check if bot is an admin (optional but highly recommended)
+                # member = await chat.get_member(client.me.id)
+                # if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                #     raise Exception("Bot is not an administrator in this channel.")
+                    
+                settings["target_chat_id"] = chat.id
+                await save_user_settings(settings)
+                await save_channel_info(user_id, chat.id, chat.username if hasattr(chat, 'username') and chat.username else None, chat.title if hasattr(chat, 'title') else str(chat.id), str(chat.type))
+                del waiting_for_input[user_id]
+                sent = await client.send_message(
+                    chat_id, 
+                    f"✅ <b>Channel updated!</b>\n\n"
+                    f"📝 Title: <b>{chat.title if hasattr(chat, 'title') else 'N/A'}</b>\n"
+                    f"🆔 ID: <code>{chat.id}</code>", 
+                    parse_mode=ParseMode.HTML, 
+                    reply_markup=get_menu_markup()
+                )
+                last_bot_messages[chat_id] = sent.id
+            except Exception as e:
+                sent = await client.send_message(
+                    chat_id, 
+                    f"❌ Error: Could not find channel or bot is not admin.\n\n{str(e)}", 
+                    parse_mode=ParseMode.HTML 
+                )
+                last_bot_messages[chat_id] = sent.id
+
+        elif input_type == "admin_welcome_caption":
+            if message.text:
+                welcome_data = waiting_for_input.get(user_id + "_welcome_data")
+                if welcome_data:
+                    success = await save_welcome_message(
+                        welcome_data['message_type'], 
+                        welcome_data['file_id'], 
+                        message.text
+                    )
+                    if success:
+                        del waiting_for_input[user_id]
+                        del waiting_for_input[user_id + "_welcome_data"]
+                        sent = await client.send_message(chat_id, "✅ Welcome message updated!", parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
+                        last_bot_messages[chat_id] = sent.id
+                    else:
+                        sent = await client.send_message(chat_id, "❌ Failed to save welcome message to database.", parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
+                        last_bot_messages[chat_id] = sent.id
+                else:
+                    del waiting_for_input[user_id]
+                    sent = await client.send_message(chat_id, "⚠️ **Error:** Media data lost. Please start over from `/admin`.", parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
+                    last_bot_messages[chat_id] = sent.id
+            else:
+                sent = await client.send_message(chat_id, "❌ Please enter a valid text caption.", parse_mode=ParseMode.HTML)
+                last_bot_messages[chat_id] = sent.id
+
+
+@app.on_message(filters.private & filters.forwarded)
+async def handle_forward(client, message):
+    user_id = message.from_user.id
+    
+    # Check if user is waiting to forward a channel message
+    if user_id in waiting_for_input and waiting_for_input[user_id] == "forward_channel":
+        try:
+            await message.delete()
+        except:
+            pass
+        await delete_last_message(client, message.chat.id)
+        
+        if message.forward_from_chat:
+            chat = message.forward_from_chat
+            settings = await get_user_settings(user_id)
+            
+            # Update settings and save channel info
+            settings["target_chat_id"] = chat.id
+            await save_user_settings(settings)
+            await save_channel_info(user_id, chat.id, chat.username if chat.username else None, chat.title, str(chat.type))
+            
+            del waiting_for_input[user_id]
+            sent = await client.send_message(
+                message.chat.id, 
+                f"✅ <b>Channel updated!</b>\n\n"
+                f"📝 Title: <b>{chat.title}</b>\n"
+                f"🆔 ID: <code>{chat.id}</code>\n"
+                f"👤 Username: @{chat.username if chat.username else 'N/A'}", 
+                parse_mode=ParseMode.HTML, 
+                reply_markup=get_menu_markup()
+            )
+            last_bot_messages[message.chat.id] = sent.id
+        else:
+            sent = await client.send_message(
+                message.chat.id, 
+                "❌ Please forward from a **channel** or **group**, not a user.", 
+                parse_mode=ParseMode.HTML
+            )
+            last_bot_messages[message.chat.id] = sent.id
+    
+    # If not waiting for input, let the auto_forward handle any forwarded video (if applicable)
+    elif filters.video(client, message) and not filters.media_group(client, message):
+        # Fall through to auto_forward if it's a single video and not from media group
+        await auto_forward(client, message)
+
+
+@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
+async def handle_media_for_welcome(client, message: Message):
+    user_id = message.from_user.id
+    # Only process if admin is setting welcome message
+    if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
+        return 
+    
+    # Only admins can set welcome media
+    if user_id not in ADMIN_IDS:
+        return
+
+    try:
+        await message.delete()
+    except:
+        pass
+    
+    await delete_last_message(client, message.chat.id)
+    
+    message_type = None
+    file_id = None
+    caption = message.caption or "" # Default to empty caption
+
+    if message.photo:
+        message_type = "photo"
+        file_id = message.photo.file_id
+    elif message.video:
+        message_type = "video"
+        file_id = message.video.file_id
+    elif message.animation:
+        message_type = "animation"
+        file_id = message.animation.file_id
+        
+    if file_id:
+        # Store media data and ask for final caption
+        waiting_for_input[user_id + "_welcome_data"] = {
+            'message_type': message_type,
+            'file_id': file_id
+        }
+        
+        # Change state to wait for caption
+        waiting_for_input[user_id] = "admin_welcome_caption"
+        
+        caption_prompt = (
+            f"🖼️ **Media received!** Type: `{message_type}`.\n\n"
+            "Now, **send the final caption** (HTML supported).\n"
+            "**Current Caption Draft:**\n"
+            f"```\n{caption if caption else 'No caption'}\n```\n\n"
+            "**Placeholders:**\n"
+            "• `{first_name}`: User's first name\n"
+            "• `{user_id}`: User's Telegram ID\n"
+            "• Use `//` to use your draft caption."
+        )
+        
+        sent = await client.send_message(
+            message.chat.id,
+            caption_prompt,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        last_bot_messages[message.chat.id] = sent.id
+    else:
+        sent = await client.send_message(
+            message.chat.id,
+            "❌ Only **Photo**, **Video**, or **GIF/Animation** are supported for the welcome message.",
+            reply_markup=get_admin_menu_markup()
+        )
+        last_bot_messages[message.chat.id] = sent.id
+
+
+@app.on_message(filters.private & filters.video & ~filters.forwarded & ~filters.media_group)
+async def auto_forward(client, message):
+    user_id = message.from_user.id
+    
+    # Ignore if waiting for input
+    if user_id in waiting_for_input:
+        return
+        
+    user_lock = get_user_lock(user_id)
+    async with user_lock:
+        try:
+            # 1. Get user settings
+            settings = await get_user_settings(user_id)
+            target_chat_id = settings.get('target_chat_id')
+            
+            if not target_chat_id:
+                await message.reply_text(
+                    "⚠️ **Error:** No target channel set.\n"
+                    "Use the main menu or `/start` to set your target channel first.",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+
+            # 2. Get current episode/quality info
+            selected_qualities = settings.get('selected_qualities', [])
+            if not selected_qualities:
+                await message.reply_text(
+                    "⚠️ **Error:** No video qualities selected.\n"
+                    "Use the main menu or `/start` to configure your quality settings.",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+
+            # Determine quality and caption
+            quality_index = settings['video_count'] % len(selected_qualities)
+            current_quality = selected_qualities[quality_index]
+            
+            # Format the caption
+            current_caption = settings["base_caption"] \
+                .replace("{season}", f"{settings['season']:02}") \
+                .replace("{episode}", f"{settings['episode']:02}") \
+                .replace("{total_episode}", f"{settings['total_episode']:02}") \
+                .replace("{quality}", current_quality)
+
+            # 3. Forward the video
+            await client.copy_message(
+                chat_id=target_chat_id,
+                from_chat_id=message.chat.id,
+                message_id=message.id,
+                caption=current_caption,
+                parse_mode=ParseMode.HTML
+            )
+            
+            # 4. Update settings and log
+            await log_upload(
+                user_id, settings['season'], settings['episode'], 
+                settings['total_episode'], current_quality, 
+                message.video.file_id if message.video else "N/A", 
+                current_caption, target_chat_id
+            )
+            
+            settings['video_count'] += 1
+            
+            # Check if all qualities for the current episode are uploaded
+            if settings['video_count'] >= settings['total_episode']:
+                # Increment episode and reset video count
+                settings['episode'] += 1
+                settings['video_count'] = 0
+                
+                await message.reply_text(
+                    f"✅ **Upload Complete!**\n\n"
+                    f"Episode {settings['episode']-1} successfully uploaded in all qualities.\n"
+                    f"Next episode: **{settings['episode']}** (Season {settings['season']}).",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                next_quality_index = settings['video_count'] % len(selected_qualities)
+                next_quality = selected_qualities[next_quality_index]
+                
+                await message.reply_text(
+                    f"✅ **Upload Successful!**\n\n"
+                    f"Quality: **{current_quality}** (Video {settings['video_count']}/{settings['total_episode']}).\n"
+                    f"Next quality to upload: **{next_quality}**.",
+                    parse_mode=ParseMode.HTML
+                )
+
+            await save_user_settings(settings)
+            
+        except Exception as e:
+            logger.error(f"Error during auto-forward for user {user_id}: {e}", exc_info=True)
+            await message.reply_text(
+                f"❌ **An Error Occurred**:\n\n`{e}`\n\n"
+                "Possible reasons:\n"
+                "• Bot is not an **Admin** in the target channel.\n"
+                "• Target channel ID is incorrect/private.\n"
+                "• The video file is corrupted or too large."
+            )
+
+        finally:
+            # The lock is released by the 'async with' block automatically
+            pass
 
 
 @app.on_callback_query()
@@ -624,30 +957,88 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         await callback_query.answer()
     except:
         pass
-    
+        
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     data = callback_query.data
-    settings = await get_user_settings(user_id)
     
+    settings = await get_user_settings(user_id)
+    await delete_last_message(client, chat_id)
+    
+    # --- ADMIN ACTIONS ---
     if data.startswith("admin_") and user_id not in ADMIN_IDS:
-        await callback_query.message.reply("❌ Access Denied: You are not an administrator.")
+        await callback_query.message.reply("❌ **Access Denied**. This feature is for admins only.", parse_mode=ParseMode.HTML)
         return
 
-    await delete_last_message(client, callback_query.message.chat.id)
-    
-    if data == "preview":
-        if not settings['target_chat_id']:
-            sent = await callback_query.message.reply(
-                "⚠️ <b>No target channel set!</b>\n\n"
-                "Please set your target channel first.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
+    if data == "admin_set_welcome":
+        waiting_for_input[user_id] = "admin_welcome"
+        sent = await callback_query.message.reply(
+            "📝 **Set Welcome Message**\n\n"
+            "**1. Send Media (Photo, Video, or GIF)** with your desired caption **draft**.\n"
+            "**2. The bot will then ask for the final caption.**\n\n"
+            "Use `/admin` to cancel.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_admin_menu_markup()
+        )
+        last_bot_messages[chat_id] = sent.id
+        return
+
+    elif data == "admin_preview_welcome":
+        welcome_data = await get_welcome_message()
+        if not welcome_data:
+            text = "⚠️ **No custom welcome message set.**"
+            sent = await callback_query.message.reply(text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
+        else:
+            text = (
+                f"👁️ **Welcome Message Preview** (Type: `{welcome_data['message_type']}`)\n\n"
+                f"**Caption:**\n{welcome_data['caption'].format(first_name='Test User', user_id=123456789)}\n\n"
+                f"**Media ID:**\n<code>{welcome_data['file_id']}</code>"
             )
-            last_bot_messages[chat_id] = sent.id
-            return
+            # Try to send media for preview
+            try:
+                if welcome_data['message_type'] == 'photo':
+                    await client.send_photo(chat_id, welcome_data['file_id'], caption=text, parse_mode=ParseMode.HTML)
+                elif welcome_data['message_type'] == 'video':
+                    await client.send_video(chat_id, welcome_data['file_id'], caption=text, parse_mode=ParseMode.HTML)
+                elif welcome_data['message_type'] == 'animation':
+                    await client.send_animation(chat_id, welcome_data['file_id'], caption=text, parse_mode=ParseMode.HTML)
+                else:
+                    await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+                
+            except Exception as e:
+                text += f"\n\n❌ **Error during media preview:** `{e}`"
+                await client.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+            
+            sent = await client.send_message(chat_id, "Use the buttons below.", parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
         
+        last_bot_messages[chat_id] = sent.id
+        return
+
+    elif data == "admin_global_stats":
+        total_users = await get_all_users_count()
+        
+        # Need to implement logic for total uploads if possible
+        
+        sent = await callback_query.message.reply(
+            f"📊 **Global Statistics**\n\n"
+            f"👥 **Total Users:** <code>{total_users}</code>\n"
+            f"💾 **DB Status:** {'✅ Connected' if db_pool else '❌ JSON Fallback'}\n"
+            f"🔗 **Render URL:** <code>{RENDER_EXTERNAL_URL}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_admin_menu_markup()
+        )
+        last_bot_messages[chat_id] = sent.id
+        return
+
+    # --- USER ACTIONS ---
+    elif data == "preview":
+        if not settings['target_chat_id']:
+            target_chat_display = "❌ Not Set"
+        else:
+            target_chat_display = f"<code>{settings['target_chat_id']}</code>"
+            
         quality = settings["selected_qualities"][settings["video_count"] % len(settings["selected_qualities"])] if settings["selected_qualities"] else "N/A"
+        
         preview_text = settings["base_caption"] \
             .replace("{season}", f"{settings['season']:02}") \
             .replace("{episode}", f"{settings['episode']:02}") \
@@ -659,33 +1050,35 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             f"<b>Current Settings:</b>\n"
             f"Season: {settings['season']}\n"
             f"Episode: {settings['episode']}\n"
-            f"Total Episode: {settings['total_episode']}\n"
-            f"Channel ID: <code>{settings['target_chat_id']}</code>\n"
+            f"Videos Done: {settings['video_count']}/{len(settings['selected_qualities'])}\n"
+            f"Next Quality: {quality}\n"
+            f"Channel ID: {target_chat_display}\n"
             f"Qualities: {', '.join(settings['selected_qualities']) if settings['selected_qualities'] else 'None'}",
             parse_mode=ParseMode.HTML,
             reply_markup=get_menu_markup()
         )
         last_bot_messages[chat_id] = sent.id
-    
+        
     elif data == "set_caption":
         waiting_for_input[user_id] = "caption"
         sent = await callback_query.message.reply(
             "✏️ <b>Set Your Caption Template</b>\n\n"
             "Send the new caption (HTML supported).\n\n"
             "<b>Placeholders:</b>\n"
-            "• `{season}`: Current season number (e.g., 01)\n"
-            "• `{episode}`: Current episode number (e.g., 05)\n"
-            "• `{total_episode}`: Total episode count (e.g., 24)\n"
-            "• `{quality}`: Current video quality (e.g., 1080p)",
+            "• <code>{season}</code> (e.g., 01)\n"
+            "• <code>{episode}</code> (e.g., 10)\n"
+            "• <code>{total_episode}</code> (e.g., 03 - total qualities)\n"
+            "• <code>{quality}</code> (e.g., 1080p)\n\n"
+            f"<b>Current Caption:</b>\n{settings['base_caption']}",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
-    
+
     elif data == "set_season":
         waiting_for_input[user_id] = "season"
         sent = await callback_query.message.reply(
-            "📺 <b>Set Season Number</b>\n\n"
-            "Send the new season number (e.g., 1, 2, 3).",
+            f"📺 <b>Set Season Number</b>\n\n"
+            f"Send the new season number (current: <code>{settings['season']}</code>).",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -693,8 +1086,9 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     elif data == "set_episode":
         waiting_for_input[user_id] = "episode"
         sent = await callback_query.message.reply(
-            "🎬 <b>Set Episode Number</b>\n\n"
-            "Send the new starting episode number (e.g., 1, 13, 25).",
+            f"🎬 <b>Set Episode Number</b>\n\n"
+            f"Send the new episode number (current: <code>{settings['episode']}</code>).\n\n"
+            "⚠️ **Note:** This resets your video count for the current episode.",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -702,8 +1096,9 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     elif data == "set_total_episode":
         waiting_for_input[user_id] = "total_episode"
         sent = await callback_query.message.reply(
-            "🔢 <b>Set Total Episode Count</b>\n\n"
-            "Send the total number of episodes in this season (e.g., 12, 24, 50).",
+            f"🔢 <b>Set Total Qualities per Episode</b>\n\n"
+            f"Send the total number of video files you will upload per episode (e.g., 3 for 3 qualities).\n"
+            f"Current: <code>{settings['total_episode']}</code>.",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -711,34 +1106,45 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     elif data == "quality_menu":
         sent = await callback_query.message.reply(
             "🎥 <b>Quality Settings</b>\n\n"
-            "Select the video qualities you plan to upload. The bot cycles through these for auto-captioning.",
+            "Toggle the video qualities you plan to upload for each episode. The bot will cycle through these in order.",
             parse_mode=ParseMode.HTML,
             reply_markup=get_quality_markup(settings['selected_qualities'])
         )
         last_bot_messages[chat_id] = sent.id
 
     elif data.startswith("toggle_quality_"):
-        quality = data.split("_")[-1]
+        quality = data.split('_')[-1]
         
-        if quality in settings['selected_qualities']:
-            settings['selected_qualities'].remove(quality)
-        else:
-            settings['selected_qualities'].append(quality)
-        
-        await save_user_settings(settings)
-        
-        await callback_query.message.edit_text(
-            "🎥 <b>Quality Settings</b>\n\n"
-            "Select the video qualities you plan to upload. The bot cycles through these for auto-captioning.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_quality_markup(settings['selected_qualities'])
-        )
-        last_bot_messages[chat_id] = callback_query.message.id
-
+        async with get_user_lock(user_id):
+            selected_qualities = settings['selected_qualities']
+            if quality in selected_qualities:
+                selected_qualities.remove(quality)
+            else:
+                selected_qualities.append(quality)
+                
+            # Sort the qualities to maintain a consistent cycle order
+            selected_qualities.sort(key=lambda q: ALL_QUALITIES.index(q))
+            
+            settings['selected_qualities'] = selected_qualities
+            
+            await save_user_settings(settings)
+            
+            # Re-send the menu with updated qualities
+            try:
+                await callback_query.message.edit_text(
+                    "🎥 <b>Quality Settings</b>\n\n"
+                    "Toggle the video qualities you plan to upload for each episode. The bot will cycle through these in order.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_quality_markup(settings['selected_qualities'])
+                )
+            except:
+                pass # Ignore if message is too old to edit
+                
     elif data == "set_channel":
         sent = await callback_query.message.reply(
             "🎯 <b>Set Target Channel</b>\n\n"
-            "Choose a method to set the channel ID where videos will be forwarded.",
+            "How would you like to set your target channel?\n\n"
+            "⚠️ **Note:** The bot must be an **admin** in the target channel!",
             parse_mode=ParseMode.HTML,
             reply_markup=get_channel_set_markup()
         )
@@ -747,18 +1153,18 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     elif data == "forward_channel":
         waiting_for_input[user_id] = "forward_channel"
         sent = await callback_query.message.reply(
-            "📤 <b>Forward a Message</b>\n\n"
-            "Please forward any message from your target channel/group.\n\n"
+            "📤 **Forward a Message from your Target Channel**\n\n"
+            "Please forward any message from your target channel/group now.\n\n"
             "⚠️ Make sure I'm an admin!",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
-
+        
     elif data == "send_channel_id":
         waiting_for_input[user_id] = "channel_id"
         sent = await callback_query.message.reply(
-            "🔗 <b>Send Channel Username or ID</b>\n\n"
-            "Send the channel username (e.g., @mychannel) or ID (e.g., -1001234567890).\n\n"
+            "🔗 **Send Channel Username or ID**\n\n"
+            "Send the channel username (e.g., `@mychannel`) or ID (e.g., `-1001234567890`).\n\n"
             "⚠️ Make sure I'm an admin!",
             parse_mode=ParseMode.HTML
         )
@@ -776,7 +1182,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             f"📺 <b>Progress:</b>\n"
             f"• Season: <code>{settings['season']}</code>\n"
             f"• Episode: <code>{settings['episode']}</code>\n"
-            f"• Total Episodes: <code>{settings['total_episode']}</code>\n\n"
+            f"• Total Qualities: <code>{settings['total_episode']}</code>\n\n"
             f"🎯 <b>Channel:</b> {channel_status}",
             parse_mode=ParseMode.HTML,
             reply_markup=get_menu_markup()
@@ -784,14 +1190,21 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         last_bot_messages[chat_id] = sent.id
 
     elif data == "back_to_main":
+        # Clear any pending input state
+        if user_id in waiting_for_input:
+            del waiting_for_input[user_id]
+        if user_id + "_welcome_data" in waiting_for_input:
+            del waiting_for_input[user_id + "_welcome_data"]
+            
         try:
             await callback_query.message.delete()
         except:
             pass
+            
         sent = await client.send_message(
-            chat_id,
-            "👋 <b>Welcome Back!</b>\n\nUse the buttons below.",
-            parse_mode=ParseMode.HTML,
+            chat_id, 
+            "👋 <b>Welcome Back!</b>\n\nUse the buttons below.", 
+            parse_mode=ParseMode.HTML, 
             reply_markup=get_menu_markup()
         )
         last_bot_messages[chat_id] = sent.id
@@ -801,703 +1214,125 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         settings["video_count"] = 0
         await save_user_settings(settings)
         sent = await callback_query.message.reply(
-            "🔄 <b>Episode progress reset!</b>\n\n"
-            "Episode is now 1. Video count is 0.",
-            parse_mode=ParseMode.HTML,
+            "🔄 **Episode Progress Reset!**\n\n"
+            "Episode is set back to **1** and video count is **0**.",
+            parse_mode=ParseMode.HTML, 
             reply_markup=get_menu_markup()
         )
         last_bot_messages[chat_id] = sent.id
-        
+
     elif data == "cancel":
+        # Clear any pending input state
         if user_id in waiting_for_input:
             del waiting_for_input[user_id]
+        if user_id + "_welcome_data" in waiting_for_input:
+            del waiting_for_input[user_id + "_welcome_data"]
+            
         try:
             await callback_query.message.delete()
         except:
             pass
-        sent = await client.send_message(
-            chat_id,
-            "❌ **Operation Cancelled.**",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
-
-    # Admin actions
-    elif data == "admin_set_welcome":
-        waiting_for_input[user_id] = "admin_welcome"
-        sent = await callback_query.message.reply(
-            "📝 <b>Set Welcome Message</b>\n\n"
-            "Send a **photo, video, GIF, or text message** for the new welcome.\n"
-            "Use a **caption** for the text part (HTML supported).\n\n"
-            "<b>Placeholders:</b>\n"
-            "• `{first_name}`: User's first name\n"
-            "• `{user_id}`: User's ID",
-            parse_mode=ParseMode.HTML
-        )
-        last_bot_messages[chat_id] = sent.id
-        
-    elif data == "admin_preview_welcome":
-        welcome_data = await get_welcome_message()
-        if not welcome_data:
-            sent = await callback_query.message.reply(
-                "❌ **No Custom Welcome Message Set.**\n\n"
-                "The bot will use the default message.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_admin_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-            return
-            
-        temp_first_name = "User Name"
-        temp_user_id = 123456789
-        caption = welcome_data['caption'].format(first_name=temp_first_name, user_id=temp_user_id)
-        
-        try:
-            if welcome_data['message_type'] == 'photo':
-                sent = await client.send_photo(chat_id, welcome_data['file_id'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-            elif welcome_data['message_type'] == 'video':
-                sent = await client.send_video(chat_id, welcome_data['file_id'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-            elif welcome_data['message_type'] == 'animation':
-                sent = await client.send_animation(chat_id, welcome_data['file_id'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-            else:
-                sent = await client.send_message(chat_id, caption, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        except Exception as e:
-            logger.error(f"Error previewing welcome message: {e}")
-            sent = await callback_query.message.reply(
-                "❌ **Error Sending Preview.**\n\n"
-                f"The file ID might be invalid or deleted. Please set a new welcome message.\n\nError: {e}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_admin_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-
-    elif data == "admin_global_stats":
-        total_users = await get_all_users_count()
-        # You can add more global stats here (e.g., total uploads)
-        
-        sent = await callback_query.message.reply(
-            "📊 <b>Global Statistics</b>\n\n"
-            f"• Total Registered Users: <code>{total_users}</code>\n"
-            "• DB Status: ✅ Connected (if no errors above)\n\n"
-            "More stats coming soon!",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_admin_menu_markup()
-        )
-        last_bot_messages[chat_id] = sent.id
 
 
-# Handler for text input when user is waiting
-@app.on_message(filters.private & filters.text & ~filters.command("start") & ~filters.command("help") & ~filters.command("stats") & ~filters.command("admin"))
-async def handle_user_input(client, message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
+# --- WEB SERVER AND CONCURRENT EXECUTION FIX START ---
+
+async def health_check(request):
+    """Health check endpoint for Render to keep the service alive."""
+    total_handlers_registered = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+    if total_handlers_registered == 0:
+        logger.warning("⚠️ Health check found zero handlers. Bot may be non-responsive.")
     
-    if user_id not in waiting_for_input:
+    # Render requires the port to be bound and a 200 response to keep the service alive.
+    return web.Response(text=f"Bot Running. Handlers found: {total_handlers_registered}", status=200)
+
+async def self_ping():
+    """Pings the health check endpoint periodically to keep the Render service awake."""
+    if not RENDER_EXTERNAL_URL:
+        logger.warning("⚠️ RENDER_EXTERNAL_URL is not set. Self-ping is disabled.")
         return
 
-    input_type = waiting_for_input[user_id]
+    health_url = f"{RENDER_EXTERNAL_URL}/health"
+    logger.info(f"🔗 Starting self-ping to {health_url}")
     
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    await delete_last_message(client, chat_id)
-    
-    settings = await get_user_settings(user_id)
-    
-    if input_type == "caption":
-        settings["base_caption"] = message.text
-        await save_user_settings(settings)
-        del waiting_for_input[user_id]
-        
-        sent = await client.send_message(chat_id, "✅ Caption template updated!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-        last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "season":
-        if message.text.isdigit():
-            settings["season"] = int(message.text)
-            await save_user_settings(settings)
-            del waiting_for_input[user_id]
-            sent = await client.send_message(chat_id, f"✅ Season updated to {settings['season']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
-            last_bot_messages[chat_id] = sent.id
-            
-    elif input_type == "episode":
-        if message.text.isdigit():
-            settings["episode"] = int(message.text)
-            settings["video_count"] = 0 # Reset video count when episode is manually set
-            await save_user_settings(settings)
-            del waiting_for_input[user_id]
-            sent = await client.send_message(chat_id, f"✅ Episode updated to {settings['episode']}! Video count reset.", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
-            last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "total_episode":
-        if message.text.isdigit():
-            settings["total_episode"] = int(message.text)
-            await save_user_settings(settings)
-            del waiting_for_input[user_id]
-            sent = await client.send_message(chat_id, f"✅ Total episode updated to {settings['total_episode']}!", parse_mode=ParseMode.HTML, reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await client.send_message(chat_id, "❌ Please enter a valid number.", parse_mode=ParseMode.HTML)
-            last_bot_messages[chat_id] = sent.id
-
-    elif input_type == "channel_id":
-        text = message.text.strip()
-        try:
-            if text.startswith('@'):
-                chat = await client.get_chat(text)
-            elif text.lstrip('-').isdigit():
-                chat = await client.get_chat(int(text))
-            else:
-                raise ValueError("Invalid format")
-            
-            settings["target_chat_id"] = chat.id
-            await save_user_settings(settings)
-            await save_channel_info(user_id, chat.id, chat.username if hasattr(chat, 'username') and chat.username else None, chat.title if hasattr(chat, 'title') else str(chat.id), str(chat.type))
-            del waiting_for_input[user_id]
-            
-            sent = await client.send_message(
-                chat_id,
-                f"✅ <b>Channel updated!</b>\n\n"
-                f"📝 Title: <b>{chat.title if hasattr(chat, 'title') else 'N/A'}</b>\n"
-                f"🆔 ID: <code>{chat.id}</code>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
-            
-        except Exception as e:
-            sent = await client.send_message(
-                chat_id,
-                f"❌ Error: Could not find channel.\n\n{str(e)}",
-                parse_mode=ParseMode.HTML
-            )
-            last_bot_messages[chat_id] = sent.id
-
-
-# Handler for forwarded message to set channel ID
-@app.on_message(filters.private & filters.forwarded)
-async def handle_forwarded_message(client, message):
-    user_id = message.from_user.id
-    
-    if user_id in waiting_for_input and waiting_for_input[user_id] == "forward_channel":
-        try:
-            await message.delete()
-        except:
-            pass
-        
-        await delete_last_message(client, message.chat.id)
-        
-        if message.forward_from_chat:
-            chat = message.forward_from_chat
-            settings = await get_user_settings(user_id)
-            settings["target_chat_id"] = chat.id
-            await save_user_settings(settings)
-            await save_channel_info(user_id, chat.id, chat.username if chat.username else None, chat.title, str(chat.type))
-            del waiting_for_input[user_id]
-            
-            sent = await client.send_message(
-                message.chat.id,
-                f"✅ <b>Channel updated!</b>\n\n"
-                f"📝 Title: <b>{chat.title}</b>\n"
-                f"🆔 ID: <code>{chat.id}</code>\n"
-                f"👤 Username: @{chat.username if chat.username else 'N/A'}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[message.chat.id] = sent.id
-        else:
-            sent = await client.send_message(
-                message.chat.id,
-                "❌ Please forward from a channel, not a user.",
-                parse_mode=ParseMode.HTML
-            )
-            last_bot_messages[message.chat.id] = sent.id
-
-
-# Handler for media input for welcome message (Admin only)
-@app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-async def handle_media_for_welcome(client, message: Message):
-    user_id = message.from_user.id
-    
-    # Only process if admin is setting welcome message
-    if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
-        return
-    
-    if user_id not in ADMIN_IDS:
-        return
-        
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    await delete_last_message(client, message.chat.id)
-    
-    message_type = None
-    file_id = None
-    caption = message.caption or "Welcome!"
-    
-    if message.photo:
-        message_type = "photo"
-        file_id = message.photo.file_id
-    elif message.video:
-        message_type = "video"
-        file_id = message.video.file_id
-    elif message.animation:
-        message_type = "animation"
-        file_id = message.animation.file_id
-    else:
-        # Should not happen based on filter, but as fallback
-        sent = await client.send_message(message.chat.id, "❌ Unsupported media type. Please send a photo, video, or GIF.", parse_mode=ParseMode.HTML)
-        last_bot_messages[message.chat.id] = sent.id
-        return
-
-    if save_welcome_message(message_type, file_id, caption):
-        del waiting_for_input[user_id]
-        sent = await client.send_message(
-            message.chat.id,
-            f"✅ **Welcome message updated!**\n\n"
-            f"Type: **{message_type.capitalize()}**\n"
-            f"Caption: `{caption[:50]}...`",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_admin_menu_markup()
-        )
-        last_bot_messages[message.chat.id] = sent.id
-    else:
-        sent = await client.send_message(message.chat.id, "❌ Error saving welcome message to database.", parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_markup())
-        last_bot_messages[message.chat.id] = sent.id
-
-
-# Handler for video forwarding (main logic)
-@app.on_message(filters.private & filters.video & ~filters.forwarded & ~filters.media_group)
-async def auto_forward(client, message):
-    user_id = message.from_user.id
-    
-    # Ignore if waiting for input
-    if user_id in waiting_for_input:
-        return
-    
-    user_lock = get_user_lock(user_id)
-    
-    async with user_lock:
-        try:
-            settings = await get_user_settings(user_id)
-            
-            if not settings['target_chat_id']:
-                await message.reply_text("❌ **Target channel not set!** Please use /start to configure your settings.", parse_mode=ParseMode.HTML)
-                return
-
-            # Determine quality based on cycle
-            available_qualities = settings['selected_qualities']
-            if not available_qualities:
-                await message.reply_text("❌ **No qualities selected!** Please use /start to configure your quality settings.", parse_mode=ParseMode.HTML)
-                return
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            try:
+                response = await client.get(health_url)
+                if response.status_code != 200:
+                    logger.warning(f"Self-ping failed (Status {response.status_code}).")
+                else:
+                    logger.debug(f"Self-ping successful (Status {response.status_code}).")
                 
-            current_quality_index = settings['video_count'] % len(available_qualities)
-            current_quality = available_qualities[current_quality_index]
-            
-            # Format the caption
-            caption = settings['base_caption'].format(
-                season=f"{settings['season']:02}",
-                episode=f"{settings['episode']:02}",
-                total_episode=f"{settings['total_episode']:02}",
-                quality=current_quality
-            )
-            
-            # Forward the video
-            forwarded_message = await client.send_video(
-                chat_id=settings['target_chat_id'],
-                video=message.video.file_id,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                supports_streaming=True
-            )
-            
-            # Log the upload
-            await log_upload(
-                user_id=user_id,
-                season=settings['season'],
-                episode=settings['episode'],
-                total_episode=settings['total_episode'],
-                quality=current_quality,
-                file_id=message.video.file_id,
-                caption=caption,
-                target_chat_id=settings['target_chat_id']
-            )
-
-            # Update settings for the next upload
-            settings['video_count'] += 1
-            
-            # Check if all selected qualities have been uploaded for the current episode
-            if settings['video_count'] % len(available_qualities) == 0:
-                settings['episode'] += 1
-                settings['video_count'] = 0
-                
-                # Auto-increment season if episode count exceeds total_episode
-                if settings['episode'] > settings['total_episode']:
-                    settings['season'] += 1
-                    settings['episode'] = 1 # Start episode 1 of new season
-                    
-                await message.reply_text(
-                    f"✅ **Upload Complete!**\n\n"
-                    f"Episode {settings['episode']-1:02} complete. Progress updated.\n"
-                    f"Next expected quality: **{available_qualities[0]}**\n"
-                    f"Next episode: **{settings['episode']:02}** (Season {settings['season']:02})",
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                next_quality_index = settings['video_count'] % len(available_qualities)
-                next_quality = available_qualities[next_quality_index]
-                
-                await message.reply_text(
-                    f"✅ **Uploaded {current_quality}** (File ID: `{message.video.file_id}`)\n\n"
-                    f"Next required quality for Episode {settings['episode']:02}: **{next_quality}**",
-                    parse_mode=ParseMode.HTML
-                )
-            
-            await save_user_settings(settings)
-            
-        except Exception as e:
-            logger.error(f"❌ Auto-forward failed for user {user_id}: {e}", exc_info=True)
-            await message.reply_text(
-                f"❌ **Upload Failed.**\n\nError: `{str(e)}`\n"
-                "Please check the bot's admin status in the target channel or try again later.",
-                parse_mode=ParseMode.HTML
-            )
-
-
-# Webhook handlers (Pyrogram's internal methods are used to process updates)
-async def webhook_handler(request):
-    """Handle incoming Telegram updates from the webhook URL"""
-    if request.path.endswith(WEBHOOK_PATH):
-        try:
-            update = await request.json()
-            # This is where Pyrogram's dispatcher is supposed to process the update
-            # We call a custom processor to manually route the update since Pyrogram's web server is not used
-            asyncio.create_task(process_update_manually(update))
-            return web.Response(status=200)
-        except Exception as e:
-            logger.error(f"❌ Error processing webhook update: {e}", exc_info=True)
-            return web.Response(status=500)
-    return web.Response(status=404)
-
-
-async def setup_webhook():
-    """Set up the Telegram webhook"""
-    if not BOT_TOKEN or not WEBHOOK_URL:
-        return False
-        
-    try:
-        # Pyrogram uses httpx for async requests, ensuring compatibility
-        import httpx
-        telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-        
-        # Delete any existing webhook first (crucial step for redeployment)
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{telegram_api_url}/deleteWebhook",
-                json={"drop_pending_updates": True}
-            )
-            logger.info("🗑️ Deleted old webhook")
-
-            # Set new webhook
-            response = await client.post(
-                f"{telegram_api_url}/setWebhook",
-                json={
-                    "url": WEBHOOK_URL,
-                    "drop_pending_updates": True,
-                    "allowed_updates": ["message", "callback_query"]
-                }
-            )
-            
-            result = response.json()
-            if result.get('ok'):
-                logger.info(f"✅ Webhook set successfully: {WEBHOOK_URL}")
-                
-                # Verify webhook
-                response = await client.get(f"{telegram_api_url}/getWebhookInfo")
-                webhook_info = response.json()
-                if webhook_info.get('ok'):
-                    info = webhook_info['result']
-                    logger.info(f"📡 Webhook URL: {info.get('url', 'N/A')}")
-                    logger.info(f"📊 Pending updates: {info.get('pending_update_count', 0)}")
-                    if info.get('last_error_message'):
-                        logger.warning(f"⚠️ Last error: {info.get('last_error_message')}")
-                
-                return True
-            else:
-                logger.error(f"❌ Failed to set webhook: {result.get('description')}")
-                return False
-                
-    except Exception as e:
-        logger.error(f"❌ Webhook setup failed: {e}", exc_info=True)
-        return False
-
+                await asyncio.sleep(600)  # Ping every 10 minutes
+            except Exception as e:
+                logger.error(f"❌ Self-ping error: {e}")
+                await asyncio.sleep(600)
 
 async def start_web_server():
-    """Start the aiohttp web server for webhook mode"""
-    if not WEBHOOK_HOST:
-        logger.error("❌ Cannot start web server: WEBHOOK_HOST is empty.")
-        return
-        
-    web_app.add_routes([
-        web.post(WEBHOOK_PATH, webhook_handler),
-        web.get("/health", lambda r: web.Response(text="OK"))
-    ])
+    """Sets up the web application and binds to the Render port."""
+    # Add health check route
+    web_app.add_routes([web.get("/health", health_check)])
     
     runner = web.AppRunner(web_app)
     await runner.setup()
     
-    try:
-        # Use 0.0.0.0 for Render compatibility
-        site = web.TCPSite(runner, '0.0.0.0', PORT)
-        await site.start()
-        logger.info(f"🌐 Web server started on port {PORT}")
-    except Exception as e:
-        logger.error(f"❌ Failed to start web server: {e}", exc_info=True)
-
-
-async def process_update_manually(update_dict):
-    """Convert and dispatch raw Telegram updates from webhook using Pyrogram's internal methods"""
-    # NOTE: This function is complex, manually building Pyrogram objects and filtering. 
-    # It ensures full compatibility when running a custom aiohttp webserver instead of Pyrogram's own.
+    # Bind to 0.0.0.0 and the PORT environment variable
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
     
-    try:
-        # Import Telegram raw types for conversion
-        from pyrogram import types
-        from pyrogram.enums import ChatType
-        
-        #logger.info(f"🔄 Processing update: {list(update_dict.keys())}")
-        
-        # Handle messages
-        if 'message' in update_dict:
-            msg = update_dict['message']
-            
-            #logger.info(f"📩 Message from user {msg.get('from', {}).get('id')}: {msg.get('text', 'N/A')}")
-
-            try:
-                # Manual conversion logic... (Original code retained for brevity)
-                
-                # Build User object
-                # Build Chat object
-                # Build Message object
-
-                # Set additional attributes that filters might check
-                # Add entities if present (for command detection)
-
-                # Find and execute matching handlers
-                message_obj = types.Message(
-                    # ... (fill with data from msg) ...
-                    id=msg.get('message_id'), from_user=types.User(
-                        id=msg.get('from', {}).get('id'), is_bot=msg.get('from', {}).get('is_bot', False), first_name=msg.get('from', {}).get('first_name', ''), client=app
-                    ), date=msg.get('date'), chat=types.Chat(
-                        id=msg.get('chat', {}).get('id'), type=ChatType.PRIVATE if msg.get('chat', {}).get('type') == 'private' else ChatType.GROUP, client=app
-                    ), text=msg.get('text'), client=app,
-                    video=types.Video(
-                        file_id=msg.get('video', {}).get('file_id', ''),
-                        file_unique_id=msg.get('video', {}).get('file_unique_id', ''),
-                        width=msg.get('video', {}).get('width', 0),
-                        height=msg.get('video', {}).get('height', 0),
-                        duration=msg.get('video', {}).get('duration', 0),
-                        mime_type=msg.get('video', {}).get('mime_type', ''),
-                        file_size=msg.get('video', {}).get('file_size', 0),
-                        client=app
-                    ) if 'video' in msg else None # Simplified video/media object creation for core handlers
-                ) 
-                
-                handlers_found = False
-                # Iterate through dispatcher groups
-                for group in sorted(app.dispatcher.groups.keys()):
-                    for handler in app.dispatcher.groups[group]:
-                        if isinstance(handler, MessageHandler):
-                            handler_name = handler.callback.__name__
-                            try:
-                                filter_result = True
-                                if handler.filters:
-                                    filter_result = await handler.filters(app, message_obj)
-                                    
-                                if filter_result:
-                                    handlers_found = True
-                                    logger.info(f"✅ Executing message handler: {handler_name}")
-                                    await handler.callback(app, message_obj)
-                                    break # Stop after finding the first matching handler in a group
-                            except Exception as e:
-                                logger.error(f"❌ Handler error in {handler_name}: {e}", exc_info=True)
-                    if handlers_found:
-                        break
-
-                if not handlers_found:
-                    logger.warning(f"⚠️ No handlers matched for message: {message_obj.text or 'Media'}")
-                    
-            except Exception as e:
-                logger.error(f"❌ Error processing message: {e}", exc_info=True)
-
-        # Handle callback queries
-        elif 'callback_query' in update_dict:
-            cb = update_dict['callback_query']
-            #logger.info(f"🔘 Callback query from user {cb.get('from', {}).get('id')}: {cb.get('data')}")
-
-            try:
-                # Manual conversion logic... (Original code retained for brevity)
-                
-                # Build User object
-                # Build Chat object
-                # Build Message object (attached to callback)
-                # Build CallbackQuery object
-
-                # Find and execute matching callback handler
-                for group in sorted(app.dispatcher.groups.keys()):
-                    for handler in app.dispatcher.groups[group]:
-                        if isinstance(handler, CallbackQueryHandler):
-                            handler_name = handler.callback.__name__
-                            try:
-                                # Simple filter check (for callback queries it's usually just filters.regex or True)
-                                filter_result = True
-                                if handler.filters:
-                                    # Create simplified CallbackQuery object for filter checking
-                                    callback_query_obj = types.CallbackQuery(
-                                        id=cb.get('id'),
-                                        from_user=types.User(id=cb.get('from', {}).get('id'), is_bot=cb.get('from', {}).get('is_bot', False), first_name=cb.get('from', {}).get('first_name', ''), client=app),
-                                        data=cb.get('data'),
-                                        client=app
-                                    )
-                                    filter_result = await handler.filters(app, callback_query_obj)
-                                
-                                if filter_result:
-                                    logger.info(f"✅ Executing callback handler: {handler_name}")
-                                    # Create the full CallbackQuery object for the handler function
-                                    full_callback_query = types.CallbackQuery(
-                                        id=cb.get('id'),
-                                        from_user=types.User(id=cb.get('from', {}).get('id'), is_bot=cb.get('from', {}).get('is_bot', False), first_name=cb.get('from', {}).get('first_name', ''), client=app),
-                                        message=types.Message(
-                                            id=cb.get('message', {}).get('message_id'),
-                                            chat=types.Chat(id=cb.get('message', {}).get('chat', {}).get('id'), type=ChatType.PRIVATE, client=app),
-                                            date=cb.get('message', {}).get('date'),
-                                            text=cb.get('message', {}).get('text'),
-                                            client=app
-                                        ) if 'message' in cb else None,
-                                        data=cb.get('data'),
-                                        client=app
-                                    )
-                                    await handler.callback(app, full_callback_query)
-                                    break
-                            except Exception as e:
-                                logger.error(f"❌ Callback handler error in {handler_name}: {e}", exc_info=True)
-
-            except Exception as e:
-                logger.error(f"❌ Error processing callback query: {e}", exc_info=True)
-
-    except Exception as e:
-        logger.error(f"❌ Unhandled update processing error: {e}", exc_info=True)
-
-
-async def self_ping():
-    """Keep the Render service awake by pinging the /health endpoint"""
-    if WEBHOOK_URL:
-        ping_url = f"{RENDER_EXTERNAL_URL}/health"
-        logger.info(f"🔗 Starting self-ping to {ping_url}")
-        while True:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(ping_url, timeout=5) as response:
-                        if response.status == 200:
-                            logger.debug("✨ Self-ping successful")
-                        else:
-                            logger.warning(f"⚠️ Self-ping returned status {response.status}")
-            except Exception as e:
-                logger.error(f"❌ Self-ping failed: {e}")
-            await asyncio.sleep(60 * 10) # Ping every 10 minutes
+    logger.info(f"🌐 Starting web server on 0.0.0.0:{PORT}")
+    await site.start()
+    
+    # Keep the web server running indefinitely
+    while True:
+        await asyncio.sleep(3600)
 
 
 async def main():
     await init_db()
     
-    # Start Pyrogram client but don't run its infinite loop yet
-    # app.start() is typically needed to fetch bot info and initialize
-    
-    # We must start the client regardless of the mode
-    await app.start() 
-    
-    # Check if we should use Webhook or Polling
     try:
-        # VVVV CRITICAL FIX 2: Modified Conditional Check VVVV
-        # Run Webhook mode ONLY if URL is present AND FORCE_POLLING is NOT true
-        if WEBHOOK_URL and not FORCE_POLLING:
-            logger.info("🔗 Running in WEBHOOK mode")
-            await start_web_server()
-            webhook_success = await setup_webhook()
-            
-            if webhook_success:
-                # Web server is running, bot is ready to receive updates
-                pass # Keep alive loop will run below
-            else:
-                logger.warning("⚠️ Webhook setup failed, falling back to POLLING mode")
-                # Fall-through logic: if webhook fails, it will hit the 'else' logic 
-                # below due to the `while True` keep alive loop structure.
-        else:
-            # Polling mode: Runs if WEBHOOK_URL is empty OR if FORCE_POLLING is true
-            logger.info("📡 Running in POLLING mode")
-            # In polling mode, the app.run() call would be here, but we already called app.start()
-            # The keep alive loop below is sufficient to keep the client running and polling
-            
+        # Start the Pyrogram client (registers handlers)
+        await app.start()
+        logger.info("✅ Pyrogram Client started successfully.")
+        
+        logger.info("📡 Running in CONCURRENT POLLING mode (App.idle() + Web Server).")
         logger.info("=" * 50)
-        total_handlers_registered = sum(len(handlers) for handlers in app.dispatcher.groups.values())
-        logger.info(f"📝 Total handlers found in dispatcher: {total_handlers_registered}")
         logger.info("✅ ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 50)
         
-        # Start self-ping only if webhook is active or if you want to keep polling alive
-        # If running in polling mode, self_ping is less critical but still useful to prevent
-        # Render from idling, assuming the bot is still making outbound requests (which it is).
-        if WEBHOOK_URL: # Only ping if a URL exists, otherwise it's just polling
-            asyncio.create_task(self_ping())
-        
-        # Keep alive - essential for both Webhook and Polling modes
-        while True:
-            await asyncio.sleep(3600)
-        
+        # Run three tasks concurrently: Pyrogram Polling, Health Check Web Server, and Self-Pinger
+        # This fixes the "No open ports" issue by binding the Render port and ensures the bot is responsive.
+        await asyncio.gather(
+            app.idle(),               # Keeps Pyrogram polling and handles updates.
+            start_web_server(),       # Binds to the port (fixes 'no open ports' Render error).
+            self_ping(),              # Keeps Render service awake.
+            return_exceptions=False   # Stop if any critical task fails
+        )
+
     except Exception as e:
-        logger.error(f"❌ Error: {e}")
-        raise
+        logger.error(f"❌ Critical error in main execution: {e}", exc_info=True)
     finally:
         logger.info("🛑 Shutting down...")
         try:
-            if WEBHOOK_URL and not FORCE_POLLING: # Only delete webhook if we attempted to set one
-                # Delete webhook on shutdown
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-                        json={"drop_pending_updates": False}
-                    )
-                logger.info("🗑️ Webhook deleted")
+            # Pyrogram cleanup
             await app.stop()
         except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
+            logger.error(f"Error during client shutdown: {e}")
+        # DB cleanup
         if db_pool:
             try:
                 await db_pool.close()
-                logger.info("🔒 Database pool closed")
             except Exception as e:
-                logger.error(f"Error closing DB pool: {e}")
-        logger.info("✅ Shutdown complete.")
+                logger.error(f"Error during DB pool close: {e}")
 
 
 if __name__ == "__main__":
     try:
-        # Run the main async function
+        # Ensure that the entire async main function is run
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Interrupted by user (Ctrl+C).")
+        logger.info("Shutting down bot via KeyboardInterrupt.")
     except Exception as e:
-        logger.error(f"Unhandled exception in main execution: {e}")
+        logger.error(f"Top-level execution error: {e}")
+
+# --- WEB SERVER AND CONCURRENT EXECUTION FIX END ---
