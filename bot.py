@@ -8,7 +8,7 @@ import asyncio
 import os
 from aiohttp import web
 import aiohttp
-import httpx # <--- ADDED: Needed for self_ping function
+import httpx # Required for self_ping function
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from datetime import datetime
@@ -32,7 +32,7 @@ PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 
-# Webhook configuration (Not used in this Polling Fix, but kept for completeness)
+# Webhook configuration (Not used in Polling mode, but kept for completeness)
 WEBHOOK_HOST = RENDER_EXTERNAL_URL.replace('https://', '').replace('http://', '') if RENDER_EXTERNAL_URL else ''
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else ''
@@ -84,9 +84,6 @@ def get_user_lock(user_id):
     if user_id not in user_locks:
         user_locks[user_id] = asyncio.Lock()
     return user_locks[user_id]
-
-
-# --- HANDLER REGISTRATION LOGIC REMOVED (Replaced by decorators below) ---
 
 
 async def init_db():
@@ -528,6 +525,8 @@ async def help_command(client, message):
     except:
         pass
     
+    await delete_last_message(client, message.chat.id)
+    
     help_text = (
         "📚 <b>Bot Commands & Features</b>\n\n"
         "🤖 <b>Basic Commands:</b>\n"
@@ -544,7 +543,6 @@ async def help_command(client, message):
         "Contact..."
     )
     
-    await delete_last_message(client, message.chat.id)
     sent = await client.send_message(
         message.chat.id,
         help_text,
@@ -682,11 +680,6 @@ async def handle_user_input(client, message):
                 else:
                     raise ValueError("Invalid format")
                 
-                # Check if bot is an admin (optional but highly recommended)
-                # member = await chat.get_member(client.me.id)
-                # if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                #     raise Exception("Bot is not an administrator in this channel.")
-                    
                 settings["target_chat_id"] = chat.id
                 await save_user_settings(settings)
                 await save_channel_info(user_id, chat.id, chat.username if hasattr(chat, 'username') and chat.username else None, chat.title if hasattr(chat, 'title') else str(chat.id), str(chat.type))
@@ -912,7 +905,7 @@ async def auto_forward(client, message):
             settings['video_count'] += 1
             
             # Check if all qualities for the current episode are uploaded
-            if settings['video_count'] >= settings['total_episode']:
+            if settings['video_count'] >= len(selected_qualities):
                 # Increment episode and reset video count
                 settings['episode'] += 1
                 settings['video_count'] = 0
@@ -929,7 +922,7 @@ async def auto_forward(client, message):
                 
                 await message.reply_text(
                     f"✅ **Upload Successful!**\n\n"
-                    f"Quality: **{current_quality}** (Video {settings['video_count']}/{settings['total_episode']}).\n"
+                    f"Quality: **{current_quality}** (Video {settings['video_count']}/{len(selected_qualities)}).\n"
                     f"Next quality to upload: **{next_quality}**.",
                     parse_mode=ParseMode.HTML
                 )
@@ -1286,25 +1279,31 @@ async def start_web_server():
     while True:
         await asyncio.sleep(3600)
 
+async def run_forever():
+    """Keeps the Pyrogram client's event loop running indefinitely, replacing the removed app.idle()."""
+    logger.info("Keep-Alive Task running...")
+    while True:
+        # This task ensures the asyncio.gather waits forever, allowing Pyrogram to poll
+        await asyncio.sleep(3600) 
+
 
 async def main():
     await init_db()
     
     try:
-        # Start the Pyrogram client (registers handlers)
+        # 1. Start the Pyrogram client (registers handlers and begins polling)
         await app.start()
         logger.info("✅ Pyrogram Client started successfully.")
         
-        logger.info("📡 Running in CONCURRENT POLLING mode (App.idle() + Web Server).")
+        logger.info("📡 Running in CONCURRENT POLLING mode (Keep-Alive + Web Server).")
         logger.info("=" * 50)
         logger.info("✅ ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 50)
         
-        # Run three tasks concurrently: Pyrogram Polling, Health Check Web Server, and Self-Pinger
-        # This fixes the "No open ports" issue by binding the Render port and ensures the bot is responsive.
+        # 2. Run tasks concurrently:
         await asyncio.gather(
-            app.idle(),               # Keeps Pyrogram polling and handles updates.
-            start_web_server(),       # Binds to the port (fixes 'no open ports' Render error).
+            run_forever(),            # FIX: Replaces app.idle() to keep the polling loop active.
+            start_web_server(),       # FIX: Binds to the port (fixes 'no open ports' Render error).
             self_ping(),              # Keeps Render service awake.
             return_exceptions=False   # Stop if any critical task fails
         )
@@ -1334,5 +1333,3 @@ if __name__ == "__main__":
         logger.info("Shutting down bot via KeyboardInterrupt.")
     except Exception as e:
         logger.error(f"Top-level execution error: {e}")
-
-# --- WEB SERVER AND CONCURRENT EXECUTION FIX END ---
