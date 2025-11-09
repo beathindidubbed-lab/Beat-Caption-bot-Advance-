@@ -16,7 +16,17 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "10000"))
 
 # Authorized users (comma-separated IDs in environment variable)
-AUTHORIZED_USERS = list(map(int, os.getenv("AUTHORIZED_USERS", "").split(","))) if os.getenv("AUTHORIZED_USERS") else []
+auth_users_str = os.getenv("AUTHORIZED_USERS", "").strip()
+if auth_users_str:
+    try:
+        AUTHORIZED_USERS = [int(uid.strip()) for uid in auth_users_str.split(",") if uid.strip()]
+    except ValueError:
+        print(f"⚠️ Warning: Invalid AUTHORIZED_USERS format: {auth_users_str}")
+        AUTHORIZED_USERS = []
+else:
+    AUTHORIZED_USERS = []
+
+print(f"🔐 Authorization: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'Open to all users'}", flush=True)
 
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
 
@@ -588,27 +598,40 @@ async def start_web_server():
 
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("STARTING BOT...")
-    print("=" * 50)
+    import sys
     
-    # Create event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print("=" * 50, flush=True)
+    print("STARTING BOT...", flush=True)
+    print("=" * 50, flush=True)
     
-    # Initialize database and web server
-    print("Initializing database...")
-    loop.run_until_complete(init_db())
-    print("Database initialized successfully!")
-    
-    print("Starting web server...")
-    loop.run_until_complete(start_web_server())
-    print(f"Web server started on port {PORT}")
-    
-    print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}")
-    print("=" * 50)
-    print("STARTING PYROGRAM BOT...")
-    print("=" * 50)
-    
-    # Start the bot (this will run forever)
-    app.run()
+    try:
+        # Create event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Initialize database and web server
+        print("Initializing database...", flush=True)
+        loop.run_until_complete(init_db())
+        print("✅ Database initialized successfully!", flush=True)
+        
+        print("Starting web server...", flush=True)
+        loop.run_until_complete(start_web_server())
+        print(f"✅ Web server started on port {PORT}", flush=True)
+        
+        print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}", flush=True)
+        print("=" * 50, flush=True)
+        print("STARTING PYROGRAM BOT...", flush=True)
+        print("=" * 50, flush=True)
+        
+        sys.stdout.flush()
+        
+        # Start the bot (this will run forever)
+        app.run()
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user", flush=True)
+    except Exception as e:
+        print(f"\n❌ FATAL ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
