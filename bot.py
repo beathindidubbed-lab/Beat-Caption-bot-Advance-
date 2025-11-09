@@ -108,25 +108,36 @@ async def init_db():
 
 
 async def load_progress():
-    """Load progress from database"""
+    """Load progress from database with retry logic"""
     global progress
-    async with db_pool.connection() as conn:
-        row = await conn.execute("""
-            SELECT target_chat_id, season, episode, total_episode, 
-                   video_count, selected_qualities, base_caption
-            FROM bot_progress WHERE id = 1
-        """)
-        data = await row.fetchone()
-        
-        if data:
-            progress["target_chat_id"] = data[0]
-            progress["season"] = data[1]
-            progress["episode"] = data[2]
-            progress["total_episode"] = data[3]
-            progress["video_count"] = data[4]
-            progress["selected_qualities"] = data[5].split(",") if data[5] else []
-            progress["base_caption"] = data[6] if data[6] else progress["base_caption"]
-            print(f"Progress loaded from database: Season {progress['season']}, Episode {progress['episode']}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with db_pool.connection() as conn:
+                row = await conn.execute("""
+                    SELECT target_chat_id, season, episode, total_episode, 
+                           video_count, selected_qualities, base_caption
+                    FROM bot_progress WHERE id = 1
+                """)
+                data = await row.fetchone()
+                
+                if data:
+                    progress["target_chat_id"] = data[0]
+                    progress["season"] = data[1]
+                    progress["episode"] = data[2]
+                    progress["total_episode"] = data[3]
+                    progress["video_count"] = data[4]
+                    progress["selected_qualities"] = data[5].split(",") if data[5] else []
+                    progress["base_caption"] = data[6] if data[6] else progress["base_caption"]
+                    print(f"Progress loaded from database: Season {progress['season']}, Episode {progress['episode']}")
+                return  # Success
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Database load failed (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
+                await asyncio.sleep(1)
+            else:
+                print(f"❌ Database load failed after {max_retries} attempts: {e}", flush=True)
+                raise
 
 
 async def save_progress():
@@ -415,27 +426,41 @@ async def handle_forwarded(client, message):
             channel_id = message.forward_from_chat.id
             channel_title = message.forward_from_chat.title
             
-            progress["target_chat_id"] = channel_id
-            await save_progress()
-            del waiting_for_input[user_id]
-            
+            # Try to verify bot can access the channel
             try:
-                await message.delete()
-            except Exception:
-                pass
-            
-            await delete_last_message(client, chat_id)
-            
-            sent = await client.send_message(
-                chat_id,
-                f"✅ Target channel set successfully!\n\n"
-                f"<b>Channel:</b> {channel_title}\n"
-                f"<b>ID:</b> <code>{channel_id}</code>\n\n"
-                f"Make sure the bot is an admin in this channel!",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_menu_markup()
-            )
-            last_bot_messages[chat_id] = sent.id
+                # Test if bot can access the channel
+                channel_info = await client.get_chat(channel_id)
+                
+                progress["target_chat_id"] = channel_id
+                await save_progress()
+                del waiting_for_input[user_id]
+                
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                
+                await delete_last_message(client, chat_id)
+                
+                sent = await client.send_message(
+                    chat_id,
+                    f"✅ Target channel set successfully!\n\n"
+                    f"<b>Channel:</b> {channel_title}\n"
+                    f"<b>ID:</b> <code>{channel_id}</code>\n\n"
+                    f"Make sure the bot is an admin with 'Post Messages' permission!",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_menu_markup()
+                )
+                last_bot_messages[chat_id] = sent.id
+            except Exception as e:
+                await message.reply(
+                    f"❌ Cannot access this channel!\n\n"
+                    f"Error: {str(e)}\n\n"
+                    f"Please:\n"
+                    f"1. Add bot as admin in the channel\n"
+                    f"2. Give it 'Post Messages' permission\n"
+                    f"3. Try again after a few seconds"
+                )
         else:
             await message.reply("❌ Please forward a message from a channel, not from a user.")
 
@@ -541,21 +566,27 @@ async def receive_input(client, message):
 async def auto_forward(client, message):
     user_id = message.from_user.id
     
+    print(f"📹 Video received from user {user_id}", flush=True)
+    
     if not is_authorized(user_id):
+        print(f"❌ Unauthorized user: {user_id}", flush=True)
         await message.reply("❌ You are not authorized to use this bot.")
         return
     
     async with upload_lock:
+        print(f"🔒 Lock acquired for video processing", flush=True)
+        
         if not progress["target_chat_id"]:
+            print(f"❌ Target channel not set", flush=True)
             await message.reply("❌ Target channel not set! Please set the target channel first using 'Set Target Channel' button.")
             return
         
         if not progress["selected_qualities"]:
+            print(f"❌ No qualities selected", flush=True)
             await message.reply("❌ No qualities selected! Please select at least one quality from the Quality Settings menu.")
             return
 
         file_id = message.video.file_id
-
         quality = progress["selected_qualities"][progress["video_count"] % len(progress["selected_qualities"])]
 
         caption = progress["base_caption"] \
@@ -564,13 +595,35 @@ async def auto_forward(client, message):
             .replace("{total_episode}", f"{progress['total_episode']:02}") \
             .replace("{quality}", quality)
 
+        print(f"📤 Forwarding video to channel {progress['target_chat_id']}", flush=True)
+        print(f"📝 Caption: {caption[:50]}...", flush=True)
+        
         try:
-            await client.send_video(
+            # First verify we can access the channel
+            try:
+                await client.get_chat(progress["target_chat_id"])
+            except Exception as e:
+                print(f"❌ Cannot access channel: {e}", flush=True)
+                await message.reply(
+                    f"❌ Cannot access target channel!\n\n"
+                    f"Channel ID: <code>{progress['target_chat_id']}</code>\n\n"
+                    f"Please make sure:\n"
+                    f"1. Bot is added as admin in the channel\n"
+                    f"2. Bot has 'Post Messages' permission\n"
+                    f"3. The channel ID is correct\n\n"
+                    f"Try setting the channel again using 'Set Target Channel' button.",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            sent_msg = await client.send_video(
                 chat_id=progress["target_chat_id"],
                 video=file_id,
                 caption=caption,
                 parse_mode=ParseMode.HTML
             )
+            
+            print(f"✅ Video forwarded successfully! Message ID: {sent_msg.id}", flush=True)
 
             await message.reply(
                 f"✅ Video forwarded with caption:\n{caption}\n\n"
@@ -584,10 +637,25 @@ async def auto_forward(client, message):
                 progress["episode"] += 1
                 progress["total_episode"] += 1
                 progress["video_count"] = 0
+                print(f"📊 Episode complete! Moving to Episode {progress['episode']}", flush=True)
 
             await save_progress()
+            print(f"💾 Progress saved to database", flush=True)
+            
         except Exception as e:
-            await message.reply(f"❌ Error forwarding video: {str(e)}\n\nMake sure the bot is an admin in the target channel!")
+            print(f"❌ Error forwarding video: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            
+            error_msg = str(e)
+            if "CHAT_ADMIN_REQUIRED" in error_msg or "not enough rights" in error_msg.lower():
+                await message.reply(f"❌ Bot is not an admin in the target channel!\n\nPlease add the bot as admin with 'Post Messages' permission.")
+            elif "CHAT_WRITE_FORBIDDEN" in error_msg:
+                await message.reply(f"❌ Bot cannot post in the target channel!\n\nMake sure the bot has permission to post messages.")
+            elif "chat not found" in error_msg.lower():
+                await message.reply(f"❌ Target channel not found!\n\nChannel ID: {progress['target_chat_id']}\n\nPlease set the channel again.")
+            else:
+                await message.reply(f"❌ Error forwarding video:\n\n{error_msg}\n\nCheck the logs for details.")
 
 
 # Health check endpoint for Render
