@@ -50,13 +50,20 @@ upload_lock = asyncio.Lock()
 async def init_db():
     """Initialize database connection and create table if not exists"""
     global db_pool
+    
+    if not DATABASE_URL:
+        print("ERROR: DATABASE_URL environment variable not set!")
+        raise ValueError("DATABASE_URL is required")
+    
+    print(f"Connecting to database...")
     db_pool = AsyncConnectionPool(
         DATABASE_URL, 
         min_size=1, 
         max_size=10,
-        open=False  # Don't open in constructor
+        open=False
     )
-    await db_pool.open()  # Open explicitly
+    await db_pool.open()
+    print("Database connection pool opened")
     
     async with db_pool.connection() as conn:
         await conn.execute("""
@@ -82,6 +89,8 @@ async def init_db():
         
         await conn.commit()
     
+    print("Database table created/verified")
+    
     # Load progress from database
     await load_progress()
 
@@ -105,6 +114,7 @@ async def load_progress():
             progress["video_count"] = data[4]
             progress["selected_qualities"] = data[5].split(",") if data[5] else []
             progress["base_caption"] = data[6] if data[6] else progress["base_caption"]
+            print(f"Progress loaded from database: Season {progress['season']}, Episode {progress['episode']}")
 
 
 async def save_progress():
@@ -577,24 +587,28 @@ async def start_web_server():
     print(f"Web server started on port {PORT}")
 
 
-async def main():
-    """Main function to start bot and web server"""
-    print("Initializing database...")
-    await init_db()
-    
-    print("Starting web server...")
-    await start_web_server()
-    
-    print("Bot started...")
-    print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}")
-
-
 if __name__ == "__main__":
-    # Run database initialization and web server
+    print("=" * 50)
+    print("STARTING BOT...")
+    print("=" * 50)
+    
+    # Create event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
+    
+    # Initialize database and web server
+    print("Initializing database...")
+    loop.run_until_complete(init_db())
+    print("Database initialized successfully!")
+    
+    print("Starting web server...")
+    loop.run_until_complete(start_web_server())
+    print(f"Web server started on port {PORT}")
+    
+    print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}")
+    print("=" * 50)
+    print("STARTING PYROGRAM BOT...")
+    print("=" * 50)
     
     # Start the bot (this will run forever)
-    print("Starting Pyrogram bot...")
     app.run()
