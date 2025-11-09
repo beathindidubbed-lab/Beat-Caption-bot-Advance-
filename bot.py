@@ -599,24 +599,45 @@ async def start_web_server():
 
 if __name__ == "__main__":
     import sys
+    import signal
+    
+    def signal_handler(sig, frame):
+        print("\n🛑 Received shutdown signal", flush=True)
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     print("=" * 50, flush=True)
     print("STARTING BOT...", flush=True)
     print("=" * 50, flush=True)
     
     try:
-        # Create event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Initialize database and web server in a separate thread
+        import threading
         
-        # Initialize database and web server
-        print("Initializing database...", flush=True)
-        loop.run_until_complete(init_db())
-        print("✅ Database initialized successfully!", flush=True)
+        def init_services():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            print("Initializing database...", flush=True)
+            loop.run_until_complete(init_db())
+            print("✅ Database initialized successfully!", flush=True)
+            
+            print("Starting web server...", flush=True)
+            loop.run_until_complete(start_web_server())
+            print(f"✅ Web server started on port {PORT}", flush=True)
+            
+            # Keep the loop running for the web server
+            loop.run_forever()
         
-        print("Starting web server...", flush=True)
-        loop.run_until_complete(start_web_server())
-        print(f"✅ Web server started on port {PORT}", flush=True)
+        # Start services in background thread
+        services_thread = threading.Thread(target=init_services, daemon=True)
+        services_thread.start()
+        
+        # Wait a bit for services to initialize
+        import time
+        time.sleep(3)
         
         print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}", flush=True)
         print("=" * 50, flush=True)
@@ -625,7 +646,7 @@ if __name__ == "__main__":
         
         sys.stdout.flush()
         
-        # Start the bot (this will run forever)
+        # Start the bot in the main thread
         app.run()
         
     except KeyboardInterrupt:
