@@ -6,8 +6,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 import asyncio
 from aiohttp import web
 import psycopg
-# FIX 1: Import AsyncConnectionPool AND the CHECK_ON_ASSIGN constant (or the *pool class* constant)
-from psycopg_pool import AsyncConnectionPool, CHECK_ON_ASSIGN 
+from psycopg_pool import AsyncConnectionPool
 
 # Bot credentials and config
 API_ID = int(os.getenv("API_ID", "28318819"))
@@ -70,10 +69,12 @@ async def init_db():
     db_pool = AsyncConnectionPool(
         DATABASE_URL, 
         min_size=1, 
-        max_size=10,
+        max_size=5,  # Reduced for serverless
         open=False,
-        # FIX 2: Use the imported CHECK_ON_ASSIGN constant directly
-        check=CHECK_ON_ASSIGN 
+        kwargs={
+            "autocommit": True,  # Auto-commit for better connection handling
+            "prepare_threshold": None,  # Disable prepared statements for serverless
+        }
     )
     await db_pool.open()
     print("Database connection pool opened")
@@ -99,8 +100,6 @@ async def init_db():
             VALUES (1, %s)
             ON CONFLICT (id) DO NOTHING
         """, (progress["base_caption"],))
-        
-        await conn.commit()
     
     print("Database table created/verified")
     
@@ -131,29 +130,38 @@ async def load_progress():
 
 
 async def save_progress():
-    """Save progress to database"""
-    async with db_pool.connection() as conn:
-        await conn.execute("""
-            UPDATE bot_progress SET
-                target_chat_id = %s,
-                season = %s,
-                episode = %s,
-                total_episode = %s,
-                video_count = %s,
-                selected_qualities = %s,
-                base_caption = %s
-            WHERE id = 1
-        """, (
-            progress["target_chat_id"],
-            progress["season"],
-            progress["episode"],
-            progress["total_episode"],
-            progress["video_count"],
-            ",".join(progress["selected_qualities"]),
-            progress["base_caption"]
-        ))
-        
-        await conn.commit()
+    """Save progress to database with retry logic"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with db_pool.connection() as conn:
+                await conn.execute("""
+                    UPDATE bot_progress SET
+                        target_chat_id = %s,
+                        season = %s,
+                        episode = %s,
+                        total_episode = %s,
+                        video_count = %s,
+                        selected_qualities = %s,
+                        base_caption = %s
+                    WHERE id = 1
+                """, (
+                    progress["target_chat_id"],
+                    progress["season"],
+                    progress["episode"],
+                    progress["total_episode"],
+                    progress["video_count"],
+                    ",".join(progress["selected_qualities"]),
+                    progress["base_caption"]
+                ))
+                return  # Success, exit function
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Database save failed (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
+                await asyncio.sleep(1)  # Wait before retry
+            else:
+                print(f"❌ Database save failed after {max_retries} attempts: {e}", flush=True)
+                raise
 
 
 def is_authorized(user_id):
