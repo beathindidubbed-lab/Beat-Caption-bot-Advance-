@@ -2,10 +2,9 @@ services:
   - type: web
     name: telegram-anime-bot
     env: python
-    buildCommand: |
-      pyenv install -s 3.12.6
-      pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    plan: free
     envVars:
       - key: API_ID
         sync: false
@@ -13,12 +12,10 @@ services:
         sync: false
       - key: BOT_TOKEN
         sync: false
-      - key: TARGET_CHAT_ID
+      - key: AUTHORIZED_USERS
         sync: false
       - key: PORT
         value: 10000
-      - key: RENDER_EXTERNAL_URL
-        value: ""
       - key: DATABASE_URL
         fromDatabase:
           name: anime-bot-db
