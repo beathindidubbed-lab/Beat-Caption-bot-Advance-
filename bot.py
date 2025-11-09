@@ -51,6 +51,7 @@ async def init_db():
     """Initialize database connection and create table if not exists"""
     global db_pool
     db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10)
+    await db_pool.open()
     
     async with db_pool.connection() as conn:
         await conn.execute("""
@@ -70,9 +71,9 @@ async def init_db():
         # Insert default row if not exists
         await conn.execute("""
             INSERT INTO bot_progress (id, base_caption)
-            VALUES (1, $1)
+            VALUES (1, %s)
             ON CONFLICT (id) DO NOTHING
-        """, progress["base_caption"])
+        """, (progress["base_caption"],))
         
         await conn.commit()
     
@@ -106,22 +107,23 @@ async def save_progress():
     async with db_pool.connection() as conn:
         await conn.execute("""
             UPDATE bot_progress SET
-                target_chat_id = $1,
-                season = $2,
-                episode = $3,
-                total_episode = $4,
-                video_count = $5,
-                selected_qualities = $6,
-                base_caption = $7
+                target_chat_id = %s,
+                season = %s,
+                episode = %s,
+                total_episode = %s,
+                video_count = %s,
+                selected_qualities = %s,
+                base_caption = %s
             WHERE id = 1
-        """, 
-        progress["target_chat_id"],
-        progress["season"],
-        progress["episode"],
-        progress["total_episode"],
-        progress["video_count"],
-        ",".join(progress["selected_qualities"]),
-        progress["base_caption"])
+        """, (
+            progress["target_chat_id"],
+            progress["season"],
+            progress["episode"],
+            progress["total_episode"],
+            progress["video_count"],
+            ",".join(progress["selected_qualities"]),
+            progress["base_caption"]
+        ))
         
         await conn.commit()
 
