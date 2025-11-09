@@ -230,11 +230,13 @@ async def start(client, message):
         await message.reply("❌ You are not authorized to use this bot.")
         return
     
+    # Delete the command message
     try:
         await message.delete()
     except Exception:
         pass
     
+    # Delete previous bot message if exists
     await delete_last_message(client, message.chat.id)
     
     target_status = f"✅ Set: {progress['target_chat_id']}" if progress['target_chat_id'] else "❌ Not Set"
@@ -244,9 +246,14 @@ async def start(client, message):
         f"<b>Target Channel:</b> {target_status}\n\n"
         "Use the buttons below to manage captions and episodes."
     )
-    sent = await client.send_message(message.chat.id, welcome_text, 
-                                     parse_mode=ParseMode.HTML,
-                                     reply_markup=get_menu_markup())
+    
+    # Only send if no previous message or it was deleted
+    sent = await client.send_message(
+        message.chat.id, 
+        welcome_text, 
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_menu_markup()
+    )
     last_bot_messages[message.chat.id] = sent.id
 
 
@@ -333,9 +340,12 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         waiting_for_input[user_id] = "set_channel"
         sent = await callback_query.message.reply(
             "📢 <b>Set Target Channel</b>\n\n"
-            "Please forward any message from the target channel where you want videos to be posted.\n\n"
+            "<b>Option 1:</b> Forward any message from the target channel\n"
+            "<b>Option 2:</b> Send the channel ID (e.g., <code>-1001234567890</code>)\n"
+            "<b>Option 3:</b> Send the channel username (e.g., <code>@yourchannel</code>)\n\n"
             "Make sure the bot is an admin in that channel!",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
         )
         last_bot_messages[chat_id] = sent.id
 
@@ -444,12 +454,15 @@ async def handle_forwarded(client, message):
                 
                 sent = await client.send_message(
                     chat_id,
-                    f"✅ Target channel set successfully!\n\n"
+                    f"✅ <b>Target channel set successfully!</b>\n\n"
                     f"<b>Channel:</b> {channel_title}\n"
                     f"<b>ID:</b> <code>{channel_id}</code>\n\n"
-                    f"Make sure the bot is an admin with 'Post Messages' permission!",
+                    f"You can now start sending videos!",
                     parse_mode=ParseMode.HTML,
-                    reply_markup=get_menu_markup()
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ])
                 )
                 last_bot_messages[chat_id] = sent.id
             except Exception as e:
@@ -459,7 +472,8 @@ async def handle_forwarded(client, message):
                     f"Please:\n"
                     f"1. Add bot as admin in the channel\n"
                     f"2. Give it 'Post Messages' permission\n"
-                    f"3. Try again after a few seconds"
+                    f"3. Try again after a few seconds",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data="set_target_channel")]])
                 )
         else:
             await message.reply("❌ Please forward a message from a channel, not from a user.")
@@ -486,7 +500,67 @@ async def receive_input(client, message):
 
     input_type = waiting_for_input[user_id]
 
-    if input_type == "caption":
+    if input_type == "set_channel":
+        # Handle channel ID or username
+        channel_input = message.text.strip()
+        
+        try:
+            # Try to get channel info
+            if channel_input.startswith('@'):
+                # Username format
+                channel_info = await client.get_chat(channel_input)
+            elif channel_input.lstrip('-').isdigit():
+                # ID format
+                channel_id = int(channel_input)
+                channel_info = await client.get_chat(channel_id)
+            else:
+                await client.send_message(
+                    chat_id,
+                    "❌ Invalid format!\n\n"
+                    "Please send:\n"
+                    "• Channel ID (e.g., <code>-1001234567890</code>)\n"
+                    "• Channel username (e.g., <code>@yourchannel</code>)\n"
+                    "• Or forward a message from the channel",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+                )
+                return
+            
+            progress["target_chat_id"] = channel_info.id
+            await save_progress()
+            del waiting_for_input[user_id]
+            
+            sent = await client.send_message(
+                chat_id,
+                f"✅ <b>Target channel set successfully!</b>\n\n"
+                f"<b>Channel:</b> {channel_info.title}\n"
+                f"<b>ID:</b> <code>{channel_info.id}</code>\n\n"
+                f"You can now start sending videos!",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                ])
+            )
+            last_bot_messages[chat_id] = sent.id
+            
+        except Exception as e:
+            await client.send_message(
+                chat_id,
+                f"❌ Cannot access this channel!\n\n"
+                f"Error: {str(e)}\n\n"
+                f"Please make sure:\n"
+                f"1. The channel ID/username is correct\n"
+                f"2. Bot is added as admin\n"
+                f"3. Bot has 'Post Messages' permission",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Try Again", callback_data="set_target_channel")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                ])
+            )
+
+    elif input_type == "caption":
         progress["base_caption"] = message.text
         await save_progress()
         del waiting_for_input[user_id]
@@ -599,22 +673,33 @@ async def auto_forward(client, message):
         print(f"📝 Caption: {caption[:50]}...", flush=True)
         
         try:
-            # First verify we can access the channel
+            # First verify we can access the channel and initialize connection
             try:
-                await client.get_chat(progress["target_chat_id"])
+                channel_info = await client.get_chat(progress["target_chat_id"])
+                print(f"✅ Channel verified: {channel_info.title}", flush=True)
             except Exception as e:
                 print(f"❌ Cannot access channel: {e}", flush=True)
-                await message.reply(
-                    f"❌ Cannot access target channel!\n\n"
-                    f"Channel ID: <code>{progress['target_chat_id']}</code>\n\n"
-                    f"Please make sure:\n"
-                    f"1. Bot is added as admin in the channel\n"
-                    f"2. Bot has 'Post Messages' permission\n"
-                    f"3. The channel ID is correct\n\n"
-                    f"Try setting the channel again using 'Set Target Channel' button.",
-                    parse_mode=ParseMode.HTML
-                )
-                return
+                
+                # Try to resolve the peer by sending a request
+                try:
+                    await client.send_chat_action(progress["target_chat_id"], "typing")
+                    print(f"✅ Peer resolved, retrying...", flush=True)
+                except:
+                    await message.reply(
+                        f"❌ Cannot access target channel!\n\n"
+                        f"Channel ID: <code>{progress['target_chat_id']}</code>\n\n"
+                        f"This usually happens when:\n"
+                        f"• Bot was just added to the channel\n"
+                        f"• Bot doesn't have proper permissions\n"
+                        f"• Channel ID is incorrect\n\n"
+                        f"<b>Solution:</b>\n"
+                        f"1. Remove bot from channel\n"
+                        f"2. Add bot back as admin with 'Post Messages' permission\n"
+                        f"3. Set the channel again using 'Set Target Channel'\n"
+                        f"4. Wait 30 seconds before sending videos",
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
             
             sent_msg = await client.send_video(
                 chat_id=progress["target_chat_id"],
