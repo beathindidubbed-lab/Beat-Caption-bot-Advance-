@@ -6,8 +6,8 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 import asyncio
 from aiohttp import web
 import psycopg
-# FIX 1: Remove the extra 'pool' import that caused the AttributeError
-from psycopg_pool import AsyncConnectionPool
+# FIX 1: Import AsyncConnectionPool AND the CHECK_ON_ASSIGN constant (or the *pool class* constant)
+from psycopg_pool import AsyncConnectionPool, CHECK_ON_ASSIGN 
 
 # Bot credentials and config
 API_ID = int(os.getenv("API_ID", "28318819"))
@@ -72,8 +72,8 @@ async def init_db():
         min_size=1, 
         max_size=10,
         open=False,
-        # FIX 2: Reference the constant through the class name itself
-        check=AsyncConnectionPool.CHECK_ON_ASSIGN 
+        # FIX 2: Use the imported CHECK_ON_ASSIGN constant directly
+        check=CHECK_ON_ASSIGN 
     )
     await db_pool.open()
     print("Database connection pool opened")
