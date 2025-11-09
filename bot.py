@@ -6,7 +6,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 import asyncio
 from aiohttp import web
 import psycopg
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, Pool  # <--- FIX 1: Import Pool
 
 # Bot credentials and config
 API_ID = int(os.getenv("API_ID", "28318819"))
@@ -70,7 +70,8 @@ async def init_db():
         DATABASE_URL, 
         min_size=1, 
         max_size=10,
-        open=False
+        open=False,
+        check=Pool.CHECK_ON_ASSIGN # <--- FIX 2: Check connection on assignment
     )
     await db_pool.open()
     print("Database connection pool opened")
