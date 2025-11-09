@@ -50,8 +50,13 @@ upload_lock = asyncio.Lock()
 async def init_db():
     """Initialize database connection and create table if not exists"""
     global db_pool
-    db_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10)
-    await db_pool.open()
+    db_pool = AsyncConnectionPool(
+        DATABASE_URL, 
+        min_size=1, 
+        max_size=10,
+        open=False  # Don't open in constructor
+    )
+    await db_pool.open()  # Open explicitly
     
     async with db_pool.connection() as conn:
         await conn.execute("""
