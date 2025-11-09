@@ -587,10 +587,14 @@ async def main():
     
     print("Bot started...")
     print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}")
-    
-    await app.start()
-    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Run database initialization and web server
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
+    
+    # Start the bot (this will run forever)
+    print("Starting Pyrogram bot...")
+    app.run()
