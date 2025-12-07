@@ -1,10 +1,21 @@
 services:
+  # PostgreSQL Database
+  - type: pserv
+    name: telegram-bot-db
+    plan: free
+    region: oregon
+    databaseName: telegram_bot
+    databaseUser: telegram_bot_user
+
+  # Web Service (Bot)
   - type: web
     name: telegram-anime-bot
     env: python
+    region: oregon
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    plan: free
+    healthCheckPath: /health
     envVars:
       - key: API_ID
         sync: false
@@ -13,8 +24,13 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: AUTHORIZED_USERS
+        value: ""
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: telegram-bot-db
+          property: connectionString
       - key: PORT
-        value: 10000
+        value: "10000"
+      - key: PYTHON_VERSION
+        value: "3.11"
