@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: telegram-anime-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    plan: free
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: AUTHORIZED_USERS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: PORT
+        value: 10000
