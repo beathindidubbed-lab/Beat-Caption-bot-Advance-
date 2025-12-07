@@ -7,13 +7,24 @@ import asyncio
 from aiohttp import web
 import psycopg
 from psycopg_pool import AsyncConnectionPool
+import sys
+import signal
 
 # Bot credentials and config
-API_ID = int(os.getenv("API_ID", "28318819"))
-API_HASH = os.getenv("API_HASH", "2996bb8e28a5bb09b56c16f6ca764c10")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8476862156:AAEMRJaLJ9PiN-8thOBr3hqGK2-PjzmWG_c")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "10000"))
+
+# Validate required environment variables
+if not all([API_ID, API_HASH, BOT_TOKEN, DATABASE_URL]):
+    print("❌ ERROR: Missing required environment variables!")
+    print(f"API_ID: {'✅' if API_ID else '❌'}")
+    print(f"API_HASH: {'✅' if API_HASH else '❌'}")
+    print(f"BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
+    print(f"DATABASE_URL: {'✅' if DATABASE_URL else '❌'}")
+    sys.exit(1)
 
 # Authorized users (comma-separated IDs in environment variable)
 auth_users_str = os.getenv("AUTHORIZED_USERS", "").strip()
@@ -41,7 +52,7 @@ progress = {
     "total_episode": 1,
     "video_count": 0,
     "selected_qualities": ["480p", "720p", "1080p"],
-    "base_caption": "<b>Anime</b> - <i>@Beat_Anime_Hindi</i>\n"
+    "base_caption": "<b>Anime</b> - <i>@YourChannel</i>\n"
                     "Season {season} - Episode {episode} ({total_episode}) - {quality}\n"
                     "<blockquote>Don't miss this episode!</blockquote>"
 }
@@ -56,60 +67,70 @@ last_bot_messages = {}
 # Lock to avoid concurrent uploads
 upload_lock = asyncio.Lock()
 
+# Web server runner (global for cleanup)
+web_runner = None
+
 
 async def init_db():
     """Initialize database connection and create table if not exists"""
     global db_pool
     
     if not DATABASE_URL:
-        print("ERROR: DATABASE_URL environment variable not set!")
         raise ValueError("DATABASE_URL is required")
     
-    print(f"Connecting to database...")
-    db_pool = AsyncConnectionPool(
-        DATABASE_URL, 
-        min_size=1, 
-        max_size=5,  # Reduced for serverless
-        open=False,
-        kwargs={
-            "autocommit": True,  # Auto-commit for better connection handling
-            "prepare_threshold": None,  # Disable prepared statements for serverless
-        }
-    )
-    await db_pool.open()
-    print("Database connection pool opened")
+    print("📊 Connecting to database...", flush=True)
     
-    async with db_pool.connection() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS bot_progress (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                target_chat_id BIGINT,
-                season INTEGER DEFAULT 1,
-                episode INTEGER DEFAULT 1,
-                total_episode INTEGER DEFAULT 1,
-                video_count INTEGER DEFAULT 0,
-                selected_qualities TEXT DEFAULT '480p,720p,1080p',
-                base_caption TEXT,
-                CONSTRAINT single_row CHECK (id = 1)
-            )
-        """)
+    try:
+        db_pool = AsyncConnectionPool(
+            DATABASE_URL, 
+            min_size=1, 
+            max_size=3,
+            open=False,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": None,
+            }
+        )
+        await db_pool.open()
+        print("✅ Database connection pool opened", flush=True)
         
-        # Insert default row if not exists
-        await conn.execute("""
-            INSERT INTO bot_progress (id, base_caption)
-            VALUES (1, %s)
-            ON CONFLICT (id) DO NOTHING
-        """, (progress["base_caption"],))
-    
-    print("Database table created/verified")
-    
-    # Load progress from database
-    await load_progress()
+        # Create table
+        async with db_pool.connection() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_progress (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    target_chat_id BIGINT,
+                    season INTEGER DEFAULT 1,
+                    episode INTEGER DEFAULT 1,
+                    total_episode INTEGER DEFAULT 1,
+                    video_count INTEGER DEFAULT 0,
+                    selected_qualities TEXT DEFAULT '480p,720p,1080p',
+                    base_caption TEXT,
+                    CONSTRAINT single_row CHECK (id = 1)
+                )
+            """)
+            
+            # Insert default row if not exists
+            await conn.execute("""
+                INSERT INTO bot_progress (id, base_caption)
+                VALUES (1, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (progress["base_caption"],))
+        
+        print("✅ Database table ready", flush=True)
+        
+        # Load progress
+        await load_progress()
+        
+    except Exception as e:
+        print(f"❌ Database initialization failed: {e}", flush=True)
+        raise
 
 
 async def load_progress():
     """Load progress from database with retry logic"""
     global progress
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -129,20 +150,22 @@ async def load_progress():
                     progress["video_count"] = data[4]
                     progress["selected_qualities"] = data[5].split(",") if data[5] else []
                     progress["base_caption"] = data[6] if data[6] else progress["base_caption"]
-                    print(f"Progress loaded from database: Season {progress['season']}, Episode {progress['episode']}")
-                return  # Success
+                    print(f"✅ Progress loaded: S{progress['season']}E{progress['episode']}", flush=True)
+                return
+                
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"⚠️ Database load failed (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
-                await asyncio.sleep(1)
+                print(f"⚠️ Load attempt {attempt + 1} failed, retrying...", flush=True)
+                await asyncio.sleep(2)
             else:
-                print(f"❌ Database load failed after {max_retries} attempts: {e}", flush=True)
+                print(f"❌ Failed to load progress after {max_retries} attempts", flush=True)
                 raise
 
 
 async def save_progress():
     """Save progress to database with retry logic"""
     max_retries = 3
+    
     for attempt in range(max_retries):
         try:
             async with db_pool.connection() as conn:
@@ -165,14 +188,14 @@ async def save_progress():
                     ",".join(progress["selected_qualities"]),
                     progress["base_caption"]
                 ))
-                return  # Success, exit function
+                return
+                
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"⚠️ Database save failed (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
-                await asyncio.sleep(1)  # Wait before retry
+                print(f"⚠️ Save attempt {attempt + 1} failed, retrying...", flush=True)
+                await asyncio.sleep(1)
             else:
-                print(f"❌ Database save failed after {max_retries} attempts: {e}", flush=True)
-                raise
+                print(f"❌ Failed to save progress: {e}", flush=True)
 
 
 def is_authorized(user_id):
@@ -194,17 +217,17 @@ async def delete_last_message(client, chat_id):
 
 def get_menu_markup():
     buttons = [
-        [InlineKeyboardButton("Preview Caption", callback_data="preview")],
-        [InlineKeyboardButton("Set Caption", callback_data="set_caption")],
+        [InlineKeyboardButton("🔍 Preview Caption", callback_data="preview")],
+        [InlineKeyboardButton("✏️ Set Caption", callback_data="set_caption")],
         [
-            InlineKeyboardButton("Set Season", callback_data="set_season"),
-            InlineKeyboardButton("Set Episode", callback_data="set_episode")
+            InlineKeyboardButton("📺 Set Season", callback_data="set_season"),
+            InlineKeyboardButton("🎬 Set Episode", callback_data="set_episode")
         ],
-        [InlineKeyboardButton("Set Total Episode", callback_data="set_total_episode")],
-        [InlineKeyboardButton("Quality Settings", callback_data="quality_menu")],
-        [InlineKeyboardButton("Set Target Channel", callback_data="set_target_channel")],
-        [InlineKeyboardButton("Reset Episode", callback_data="reset")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
+        [InlineKeyboardButton("🔢 Set Total Episode", callback_data="set_total_episode")],
+        [InlineKeyboardButton("🎥 Quality Settings", callback_data="quality_menu")],
+        [InlineKeyboardButton("🎯 Set Target Channel", callback_data="set_target_channel")],
+        [InlineKeyboardButton("🔄 Reset Episode", callback_data="reset")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
     return InlineKeyboardMarkup(buttons)
 
@@ -230,13 +253,11 @@ async def start(client, message):
         await message.reply("❌ You are not authorized to use this bot.")
         return
     
-    # Delete the command message
     try:
         await message.delete()
     except Exception:
         pass
     
-    # Delete previous bot message if exists
     await delete_last_message(client, message.chat.id)
     
     target_status = f"✅ Set: {progress['target_chat_id']}" if progress['target_chat_id'] else "❌ Not Set"
@@ -247,7 +268,6 @@ async def start(client, message):
         "Use the buttons below to manage captions and episodes."
     )
     
-    # Only send if no previous message or it was deleted
     sent = await client.send_message(
         message.chat.id, 
         welcome_text, 
@@ -263,7 +283,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     
     if not is_authorized(user_id):
         try:
-            await callback_query.answer("❌ You are not authorized to use this bot.", show_alert=True)
+            await callback_query.answer("❌ You are not authorized.", show_alert=True)
         except Exception:
             pass
         return
@@ -313,7 +333,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         waiting_for_input[user_id] = "season"
         sent = await callback_query.message.reply(
             f"✏️ Current season: <b>{progress['season']}</b>\n\n"
-            "Please send the new season number (e.g., 1, 2, 3, etc.).",
+            "Please send the new season number (e.g., 1, 2, 3).",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -322,7 +342,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         waiting_for_input[user_id] = "episode"
         sent = await callback_query.message.reply(
             f"✏️ Current episode: <b>{progress['episode']}</b>\n\n"
-            "Please send the new episode number for this season (e.g., 1, 2, 3, etc.).",
+            "Please send the new episode number (e.g., 1, 2, 3).",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -331,7 +351,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         waiting_for_input[user_id] = "total_episode"
         sent = await callback_query.message.reply(
             f"✏️ Current total episode: <b>{progress['total_episode']}</b>\n\n"
-            "Please send the new total episode number (e.g., 1, 2, 3, etc.).",
+            "Please send the new total episode number.",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
@@ -343,7 +363,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             "<b>Option 1:</b> Forward any message from the target channel\n"
             "<b>Option 2:</b> Send the channel ID (e.g., <code>-1001234567890</code>)\n"
             "<b>Option 3:</b> Send the channel username (e.g., <code>@yourchannel</code>)\n\n"
-            "Make sure the bot is an admin in that channel!",
+            "⚠️ Make sure the bot is an admin in that channel!",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
         )
@@ -405,8 +425,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         progress["video_count"] = 0
         await save_progress()
         sent = await callback_query.message.reply(
-            f"🔄 Episode counter reset. Starting from Episode {progress['episode']} (Season {progress['season']}).\n"
-            f"Total episode counter: {progress['total_episode']}",
+            f"🔄 Episode counter reset to 1 (Season {progress['season']}).",
             parse_mode=ParseMode.HTML,
             reply_markup=get_menu_markup()
         )
@@ -415,11 +434,11 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     elif data == "cancel":
         if user_id in waiting_for_input:
             del waiting_for_input[user_id]
-            sent = await callback_query.message.reply("❌ Process cancelled.", reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
-        else:
-            sent = await callback_query.message.reply("No ongoing process to cancel.", reply_markup=get_menu_markup())
-            last_bot_messages[chat_id] = sent.id
+        sent = await callback_query.message.reply(
+            "❌ Operation cancelled.",
+            reply_markup=get_menu_markup()
+        )
+        last_bot_messages[chat_id] = sent.id
 
 
 @app.on_message(filters.private & filters.forwarded)
@@ -436,10 +455,8 @@ async def handle_forwarded(client, message):
             channel_id = message.forward_from_chat.id
             channel_title = message.forward_from_chat.title
             
-            # Try to verify bot can access the channel
             try:
-                # Test if bot can access the channel
-                channel_info = await client.get_chat(channel_id)
+                await client.get_chat(channel_id)
                 
                 progress["target_chat_id"] = channel_id
                 await save_progress()
@@ -454,15 +471,12 @@ async def handle_forwarded(client, message):
                 
                 sent = await client.send_message(
                     chat_id,
-                    f"✅ <b>Target channel set successfully!</b>\n\n"
+                    f"✅ <b>Target channel set!</b>\n\n"
                     f"<b>Channel:</b> {channel_title}\n"
                     f"<b>ID:</b> <code>{channel_id}</code>\n\n"
                     f"You can now start sending videos!",
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main")],
-                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                    ])
+                    reply_markup=get_menu_markup()
                 )
                 last_bot_messages[chat_id] = sent.id
             except Exception as e:
@@ -472,7 +486,7 @@ async def handle_forwarded(client, message):
                     f"Please:\n"
                     f"1. Add bot as admin in the channel\n"
                     f"2. Give it 'Post Messages' permission\n"
-                    f"3. Try again after a few seconds",
+                    f"3. Try again",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data="set_target_channel")]])
                 )
         else:
@@ -501,16 +515,12 @@ async def receive_input(client, message):
     input_type = waiting_for_input[user_id]
 
     if input_type == "set_channel":
-        # Handle channel ID or username
         channel_input = message.text.strip()
         
         try:
-            # Try to get channel info
             if channel_input.startswith('@'):
-                # Username format
                 channel_info = await client.get_chat(channel_input)
             elif channel_input.lstrip('-').isdigit():
-                # ID format
                 channel_id = int(channel_input)
                 channel_info = await client.get_chat(channel_id)
             else:
@@ -532,15 +542,11 @@ async def receive_input(client, message):
             
             sent = await client.send_message(
                 chat_id,
-                f"✅ <b>Target channel set successfully!</b>\n\n"
+                f"✅ <b>Target channel set!</b>\n\n"
                 f"<b>Channel:</b> {channel_info.title}\n"
-                f"<b>ID:</b> <code>{channel_info.id}</code>\n\n"
-                f"You can now start sending videos!",
+                f"<b>ID:</b> <code>{channel_info.id}</code>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                ])
+                reply_markup=get_menu_markup()
             )
             last_bot_messages[chat_id] = sent.id
             
@@ -549,15 +555,12 @@ async def receive_input(client, message):
                 chat_id,
                 f"❌ Cannot access this channel!\n\n"
                 f"Error: {str(e)}\n\n"
-                f"Please make sure:\n"
+                f"Make sure:\n"
                 f"1. The channel ID/username is correct\n"
                 f"2. Bot is added as admin\n"
                 f"3. Bot has 'Post Messages' permission",
                 parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Try Again", callback_data="set_target_channel")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                ])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", callback_data="set_target_channel")]])
             )
 
     elif input_type == "caption":
@@ -588,7 +591,7 @@ async def receive_input(client, message):
         else:
             sent = await client.send_message(
                 chat_id,
-                "❌ Please enter a valid season number (e.g., 1, 2, 3, etc.).",
+                "❌ Please enter a valid number.",
                 parse_mode=ParseMode.HTML
             )
             last_bot_messages[chat_id] = sent.id
@@ -609,7 +612,7 @@ async def receive_input(client, message):
         else:
             sent = await client.send_message(
                 chat_id,
-                "❌ Please enter a valid episode number (e.g., 1, 2, 3, etc.).",
+                "❌ Please enter a valid number.",
                 parse_mode=ParseMode.HTML
             )
             last_bot_messages[chat_id] = sent.id
@@ -630,7 +633,7 @@ async def receive_input(client, message):
         else:
             sent = await client.send_message(
                 chat_id,
-                "❌ Please enter a valid total episode number (e.g., 1, 2, 3, etc.).",
+                "❌ Please enter a valid number.",
                 parse_mode=ParseMode.HTML
             )
             last_bot_messages[chat_id] = sent.id
@@ -640,24 +643,17 @@ async def receive_input(client, message):
 async def auto_forward(client, message):
     user_id = message.from_user.id
     
-    print(f"📹 Video received from user {user_id}", flush=True)
-    
     if not is_authorized(user_id):
-        print(f"❌ Unauthorized user: {user_id}", flush=True)
         await message.reply("❌ You are not authorized to use this bot.")
         return
     
     async with upload_lock:
-        print(f"🔒 Lock acquired for video processing", flush=True)
-        
         if not progress["target_chat_id"]:
-            print(f"❌ Target channel not set", flush=True)
-            await message.reply("❌ Target channel not set! Please set the target channel first using 'Set Target Channel' button.")
+            await message.reply("❌ Target channel not set! Please set it first using 'Set Target Channel' button.")
             return
         
         if not progress["selected_qualities"]:
-            print(f"❌ No qualities selected", flush=True)
-            await message.reply("❌ No qualities selected! Please select at least one quality from the Quality Settings menu.")
+            await message.reply("❌ No qualities selected! Please select at least one quality from Quality Settings.")
             return
 
         file_id = message.video.file_id
@@ -669,37 +665,13 @@ async def auto_forward(client, message):
             .replace("{total_episode}", f"{progress['total_episode']:02}") \
             .replace("{quality}", quality)
 
-        print(f"📤 Forwarding video to channel {progress['target_chat_id']}", flush=True)
-        print(f"📝 Caption: {caption[:50]}...", flush=True)
-        
         try:
-            # First verify we can access the channel and initialize connection
+            # Verify channel access
             try:
-                channel_info = await client.get_chat(progress["target_chat_id"])
-                print(f"✅ Channel verified: {channel_info.title}", flush=True)
-            except Exception as e:
-                print(f"❌ Cannot access channel: {e}", flush=True)
-                
-                # Try to resolve the peer by sending a request
-                try:
-                    await client.send_chat_action(progress["target_chat_id"], "typing")
-                    print(f"✅ Peer resolved, retrying...", flush=True)
-                except:
-                    await message.reply(
-                        f"❌ Cannot access target channel!\n\n"
-                        f"Channel ID: <code>{progress['target_chat_id']}</code>\n\n"
-                        f"This usually happens when:\n"
-                        f"• Bot was just added to the channel\n"
-                        f"• Bot doesn't have proper permissions\n"
-                        f"• Channel ID is incorrect\n\n"
-                        f"<b>Solution:</b>\n"
-                        f"1. Remove bot from channel\n"
-                        f"2. Add bot back as admin with 'Post Messages' permission\n"
-                        f"3. Set the channel again using 'Set Target Channel'\n"
-                        f"4. Wait 30 seconds before sending videos",
-                        parse_mode=ParseMode.HTML
-                    )
-                    return
+                await client.get_chat(progress["target_chat_id"])
+            except Exception:
+                await client.send_chat_action(progress["target_chat_id"], "typing")
+                await asyncio.sleep(1)
             
             sent_msg = await client.send_video(
                 chat_id=progress["target_chat_id"],
@@ -707,11 +679,9 @@ async def auto_forward(client, message):
                 caption=caption,
                 parse_mode=ParseMode.HTML
             )
-            
-            print(f"✅ Video forwarded successfully! Message ID: {sent_msg.id}", flush=True)
 
             await message.reply(
-                f"✅ Video forwarded with caption:\n{caption}\n\n"
+                f"✅ Video forwarded!\n\n"
                 f"Progress: {progress['video_count'] + 1}/{len(progress['selected_qualities'])} videos for this episode",
                 parse_mode=ParseMode.HTML
             )
@@ -722,101 +692,105 @@ async def auto_forward(client, message):
                 progress["episode"] += 1
                 progress["total_episode"] += 1
                 progress["video_count"] = 0
-                print(f"📊 Episode complete! Moving to Episode {progress['episode']}", flush=True)
 
             await save_progress()
-            print(f"💾 Progress saved to database", flush=True)
             
         except Exception as e:
-            print(f"❌ Error forwarding video: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            
             error_msg = str(e)
             if "CHAT_ADMIN_REQUIRED" in error_msg or "not enough rights" in error_msg.lower():
-                await message.reply(f"❌ Bot is not an admin in the target channel!\n\nPlease add the bot as admin with 'Post Messages' permission.")
+                await message.reply("❌ Bot is not an admin in the target channel!\n\nPlease add the bot as admin with 'Post Messages' permission.")
             elif "CHAT_WRITE_FORBIDDEN" in error_msg:
-                await message.reply(f"❌ Bot cannot post in the target channel!\n\nMake sure the bot has permission to post messages.")
+                await message.reply("❌ Bot cannot post in the target channel!\n\nMake sure the bot has permission to post messages.")
             elif "chat not found" in error_msg.lower():
-                await message.reply(f"❌ Target channel not found!\n\nChannel ID: {progress['target_chat_id']}\n\nPlease set the channel again.")
+                await message.reply(f"❌ Target channel not found!\n\nPlease set the channel again.")
             else:
-                await message.reply(f"❌ Error forwarding video:\n\n{error_msg}\n\nCheck the logs for details.")
+                await message.reply(f"❌ Error: {error_msg}")
 
 
-# Health check endpoint for Render
 async def health_check(request):
+    """Health check endpoint"""
     return web.Response(text="Bot is running!")
 
 
 async def start_web_server():
-    """Start web server for Render health checks"""
+    """Start web server for health checks"""
+    global web_runner
+    
     app_web = web.Application()
     app_web.router.add_get('/', health_check)
     app_web.router.add_get('/health', health_check)
     
-    runner = web.AppRunner(app_web)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    web_runner = web.AppRunner(app_web)
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"Web server started on port {PORT}")
+    print(f"✅ Web server started on port {PORT}", flush=True)
+
+
+async def cleanup():
+    """Cleanup resources on shutdown"""
+    global db_pool, web_runner
+    
+    print("\n🧹 Cleaning up...", flush=True)
+    
+    if web_runner:
+        try:
+            await web_runner.cleanup()
+            print("✅ Web server stopped", flush=True)
+        except Exception as e:
+            print(f"⚠️ Web server cleanup error: {e}", flush=True)
+    
+    if db_pool:
+        try:
+            await db_pool.close()
+            print("✅ Database connection closed", flush=True)
+        except Exception as e:
+            print(f"⚠️ Database cleanup error: {e}", flush=True)
+
+
+async def main():
+    """Main async function"""
+    try:
+        print("=" * 50, flush=True)
+        print("🚀 STARTING BOT", flush=True)
+        print("=" * 50, flush=True)
+        
+        # Initialize database
+        print("📊 Initializing database...", flush=True)
+        await init_db()
+        
+        # Start web server
+        print("🌐 Starting web server...", flush=True)
+        await start_web_server()
+        
+        print(f"🔐 Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users'}", flush=True)
+        print("=" * 50, flush=True)
+        print("✅ BOT IS READY!", flush=True)
+        print("=" * 50, flush=True)
+        
+        # Start Pyrogram client
+        await app.start()
+        print("✅ Pyrogram client started", flush=True)
+        
+        # Keep running
+        await asyncio.Event().wait()
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Received shutdown signal", flush=True)
+    except Exception as e:
+        print(f"\n❌ Fatal error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    finally:
+        await cleanup()
+        await app.stop()
 
 
 if __name__ == "__main__":
-    import sys
-    import signal
-    
-    def signal_handler(sig, frame):
-        print("\n🛑 Received shutdown signal", flush=True)
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    print("=" * 50, flush=True)
-    print("STARTING BOT...", flush=True)
-    print("=" * 50, flush=True)
-    
     try:
-        # Initialize database and web server in a separate thread
-        import threading
-        
-        def init_services():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            print("Initializing database...", flush=True)
-            loop.run_until_complete(init_db())
-            print("✅ Database initialized successfully!", flush=True)
-            
-            print("Starting web server...", flush=True)
-            loop.run_until_complete(start_web_server())
-            print(f"✅ Web server started on port {PORT}", flush=True)
-            
-            # Keep the loop running for the web server
-            loop.run_forever()
-        
-        # Start services in background thread
-        services_thread = threading.Thread(target=init_services, daemon=True)
-        services_thread.start()
-        
-        # Wait a bit for services to initialize
-        import time
-        time.sleep(3)
-        
-        print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users (no restriction)'}", flush=True)
-        print("=" * 50, flush=True)
-        print("STARTING PYROGRAM BOT...", flush=True)
-        print("=" * 50, flush=True)
-        
-        sys.stdout.flush()
-        
-        # Start the bot in the main thread
-        app.run()
-        
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n🛑 Bot stopped by user", flush=True)
     except Exception as e:
-        print(f"\n❌ FATAL ERROR: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+        print(f"\n❌ Startup error: {e}", flush=True)
         sys.exit(1)
