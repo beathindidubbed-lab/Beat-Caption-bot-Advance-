@@ -30,15 +30,20 @@ PORT = int(os.getenv('PORT', '10000'))
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 
-# Admin IDs
-ADMIN_IDS = [
-    int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()
-]
+# Admin IDs - FIXED: Proper environment variable handling
+ADMIN_IDS = []
+admin_ids_env = os.getenv('ADMIN_IDS', '').strip()
+if admin_ids_env:
+    try:
+        ADMIN_IDS = [int(id.strip()) for id in admin_ids_env.split(',') if id.strip()]
+        logger.info(f"🔧 Admin IDs configured: {ADMIN_IDS}")
+    except ValueError:
+        logger.error("❌ Invalid ADMIN_IDS format in environment variables")
+        ADMIN_IDS = []
 
 if not ADMIN_IDS:
-    ADMIN_IDS = [123456789]
-
-logger.info(f"🔧 Admin IDs configured: {ADMIN_IDS}")
+    logger.warning("⚠️ No admin IDs configured. Admin features will be unavailable.")
+    logger.warning("⚠️ Set ADMIN_IDS environment variable with your Telegram user ID.")
 
 # Default settings
 ALL_QUALITIES = ["480p", "720p", "1080p", "4K", "2160p"]
@@ -49,7 +54,7 @@ DEFAULT_CAPTION = ("<b>Anime</b> - <i>@Your_Channel</i>\n"
 # Database pool
 db_pool = None
 
-# Pyrogram app
+# Initialize Pyrogram app
 app = Client(
     "auto_caption_bot",
     api_id=API_ID,
@@ -76,7 +81,6 @@ def get_user_lock(user_id):
         user_locks[user_id] = asyncio.Lock()
     return user_locks[user_id]
 
-
 async def init_db():
     """Initialize PostgreSQL database"""
     global db_pool
@@ -87,6 +91,7 @@ async def init_db():
             
             async with db_pool.connection() as conn:
                 async with conn.cursor() as cur:
+                    # User settings table
                     await cur.execute('''
                         CREATE TABLE IF NOT EXISTS user_settings (
                             user_id BIGINT PRIMARY KEY,
@@ -104,6 +109,7 @@ async def init_db():
                         )
                     ''')
                     
+                    # Welcome settings table
                     await cur.execute('''
                         CREATE TABLE IF NOT EXISTS welcome_settings (
                             id SERIAL PRIMARY KEY,
@@ -115,6 +121,7 @@ async def init_db():
                         )
                     ''')
                     
+                    # Upload history table
                     await cur.execute('''
                         CREATE TABLE IF NOT EXISTS upload_history (
                             id SERIAL PRIMARY KEY,
@@ -130,6 +137,7 @@ async def init_db():
                         )
                     ''')
                     
+                    # Channel info table
                     await cur.execute('''
                         CREATE TABLE IF NOT EXISTS channel_info (
                             user_id BIGINT NOT NULL,
@@ -142,6 +150,7 @@ async def init_db():
                         )
                     ''')
                     
+                    # Create indexes
                     await cur.execute('''
                         CREATE INDEX IF NOT EXISTS idx_upload_history_user_id 
                         ON upload_history(user_id)
@@ -186,6 +195,7 @@ async def get_user_settings(user_id, username=None, first_name=None):
                             'target_chat_id': row_dict['target_chat_id']
                         }
                     else:
+                        # Create new user
                         default_settings = {
                             'user_id': user_id,
                             'season': 1,
@@ -369,7 +379,6 @@ async def save_welcome_message(message_type, file_id, caption):
             logger.error(f"Error saving welcome message: {e}")
     return False
 
-
 async def delete_last_message(client, chat_id):
     """Delete the last bot message"""
     if chat_id in last_bot_messages:
@@ -381,8 +390,9 @@ async def delete_last_message(client, chat_id):
 
 
 def get_menu_markup():
+    """Main menu markup"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Preview Caption", callback_data="preview")],
+        [InlineKeyboardButton("🔍 Preview Caption", callback_data="preview")],
         [InlineKeyboardButton("✏️ Set Caption", callback_data="set_caption")],
         [
             InlineKeyboardButton("📺 Set Season", callback_data="set_season"),
@@ -398,6 +408,7 @@ def get_menu_markup():
 
 
 def get_admin_menu_markup():
+    """Admin menu markup"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Set Welcome Message", callback_data="admin_set_welcome")],
         [InlineKeyboardButton("👁️ Preview Welcome", callback_data="admin_preview_welcome")],
@@ -407,6 +418,7 @@ def get_admin_menu_markup():
 
 
 def get_quality_markup(selected_qualities):
+    """Quality selection markup"""
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(
             f"{'✅ ' if q in selected_qualities else ''}{q}",
@@ -417,17 +429,18 @@ def get_quality_markup(selected_qualities):
 
 
 def get_channel_set_markup():
+    """Channel setting markup"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Forward Message", callback_data="forward_channel")],
         [InlineKeyboardButton("🔗 Send Username/ID", callback_data="send_channel_id")],
         [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main")]
     ])
 
-
-# Handler functions
+# ===== MESSAGE HANDLERS =====
 
 @app.on_message(filters.private & filters.command("start"))
-async def start(client, message):
+async def start_handler(client, message):
+    """Handle /start command"""
     logger.info(f"📨 /start from user {message.from_user.id} (@{message.from_user.username})")
     
     user_id = message.from_user.id
@@ -446,11 +459,13 @@ async def start(client, message):
     
     if welcome_data and welcome_data['file_id']:
         try:
+            caption_text = welcome_data['caption'].format(first_name=first_name, user_id=user_id)
+            
             if welcome_data['message_type'] == 'photo':
                 sent = await client.send_photo(
                     message.chat.id,
                     photo=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption=caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
@@ -458,7 +473,7 @@ async def start(client, message):
                 sent = await client.send_video(
                     message.chat.id,
                     video=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption=caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
@@ -466,14 +481,14 @@ async def start(client, message):
                 sent = await client.send_animation(
                     message.chat.id,
                     animation=welcome_data['file_id'],
-                    caption=welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption=caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
             else:
                 sent = await client.send_message(
                     message.chat.id,
-                    welcome_data['caption'].format(first_name=first_name, user_id=user_id),
+                    caption_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_menu_markup()
                 )
@@ -509,7 +524,8 @@ async def start(client, message):
 
 
 @app.on_message(filters.private & filters.command("help"))
-async def help_command(client, message):
+async def help_handler(client, message):
+    """Handle /help command"""
     try:
         await message.delete()
     except:
@@ -530,20 +546,21 @@ async def help_command(client, message):
         "• Preview caption before uploading\n"
         "• Each user has independent settings\n\n"
         "❓ <b>Need Help?</b>\n"
-        "Contact..."
+        "Check the documentation or contact support."
     )
     
     sent = await client.send_message(
         message.chat.id,
         help_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=get_menu_markup() if message.from_user.id not in ADMIN_IDS else get_admin_menu_markup()
+        reply_markup=get_menu_markup()
     )
     last_bot_messages[message.chat.id] = sent.id
 
 
 @app.on_message(filters.private & filters.command("stats"))
-async def stats_command(client, message):
+async def stats_handler(client, message):
+    """Handle /stats command"""
     user_id = message.from_user.id
     settings = await get_user_settings(user_id)
     total, today = await get_user_upload_stats(user_id)
@@ -575,9 +592,13 @@ async def stats_command(client, message):
 
 
 @app.on_message(filters.private & filters.command("admin"))
-async def admin_command(client, message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.reply("❌ **Access Denied**. You are not an admin.")
+async def admin_handler(client, message):
+    """Handle /admin command"""
+    if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+        await message.reply(
+            "❌ **Access Denied**. You are not an admin.\n\n"
+            "To enable admin features, contact the bot owner."
+        )
         return
         
     try:
@@ -595,9 +616,9 @@ async def admin_command(client, message):
     )
     last_bot_messages[message.chat.id] = sent.id
 
-
 @app.on_message(filters.private & (filters.text | filters.sticker) & filters.incoming & ~filters.command(["start", "help", "stats", "admin"]))
-async def handle_user_input(client, message):
+async def text_input_handler(client, message):
+    """Handle text input from users"""
     user_id = message.from_user.id
     chat_id = message.chat.id
     input_type = waiting_for_input.get(user_id)
@@ -717,12 +738,11 @@ async def handle_user_input(client, message):
                 sent = await client.send_message(chat_id, "❌ Please enter a valid text caption.", parse_mode=ParseMode.HTML)
                 last_bot_messages[chat_id] = sent.id
 
-
 @app.on_message(filters.private & filters.forwarded)
-async def handle_forward(client, message):
+async def forward_handler(client, message):
+    """Handle forwarded messages for channel setup"""
     user_id = message.from_user.id
     
-    # Check if user is waiting to forward a channel message
     if user_id in waiting_for_input and waiting_for_input[user_id] == "forward_channel":
         try:
             await message.delete()
@@ -759,13 +779,13 @@ async def handle_forward(client, message):
 
 
 @app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-async def handle_media_for_welcome(client, message: Message):
+async def media_handler(client, message: Message):
+    """Handle media for welcome message setup"""
     user_id = message.from_user.id
-    # Only process if admin is setting welcome message
+    
     if user_id not in waiting_for_input or waiting_for_input[user_id] != "admin_welcome":
         return 
     
-    # Only admins can set welcome media
     if user_id not in ADMIN_IDS:
         return
 
@@ -805,8 +825,7 @@ async def handle_media_for_welcome(client, message: Message):
             f"```\n{caption if caption else 'No caption'}\n```\n\n"
             "**Placeholders:**\n"
             "• `{first_name}`: User's first name\n"
-            "• `{user_id}`: User's Telegram ID\n"
-            "• Use `//` to use your draft caption."
+            "• `{user_id}`: User's Telegram ID"
         )
         
         sent = await client.send_message(
@@ -825,10 +844,10 @@ async def handle_media_for_welcome(client, message: Message):
 
 
 @app.on_message(filters.private & filters.video & ~filters.forwarded & ~filters.media_group)
-async def auto_forward(client, message):
+async def video_handler(client, message):
+    """Handle video uploads for auto-forwarding"""
     user_id = message.from_user.id
     
-    # Ignore if waiting for input
     if user_id in waiting_for_input:
         return
         
@@ -914,9 +933,9 @@ async def auto_forward(client, message):
                 "• The video file is corrupted or too large."
             )
 
-
 @app.on_callback_query()
-async def handle_buttons(client, callback_query: CallbackQuery):
+async def callback_handler(client, callback_query: CallbackQuery):
+    """Handle button clicks"""
     try:
         await callback_query.answer()
     except:
@@ -1007,7 +1026,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             .replace("{quality}", quality)
             
         sent = await callback_query.message.reply(
-            f"🔄 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
+            f"🔍 <b>Preview Caption:</b>\n\n{preview_text}\n\n"
             f"<b>Current Settings:</b>\n"
             f"Season: {settings['season']}\n"
             f"Episode: {settings['episode']}\n"
@@ -1028,7 +1047,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             "<b>Placeholders:</b>\n"
             "• <code>{season}</code> (e.g., 01)\n"
             "• <code>{episode}</code> (e.g., 10)\n"
-            "• <code>{total_episode}</code> (e.g., 03 - total qualities)\n"
+            "• <code>{total_episode}</code> (e.g., 03)\n"
             "• <code>{quality}</code> (e.g., 1080p)\n\n"
             f"<b>Current Caption:</b>\n{settings['base_caption']}",
             parse_mode=ParseMode.HTML
@@ -1057,13 +1076,15 @@ async def handle_buttons(client, callback_query: CallbackQuery):
     elif data == "set_total_episode":
         waiting_for_input[user_id] = "total_episode"
         sent = await callback_query.message.reply(
-            f"🔢 <b>Set Total Qualities per Episode</b>\n\n"
-            f"Send the total number of video files you will upload per episode (e.g., 3 for 3 qualities).\n"
-            f"Current: <code>{settings['total_episode']}</code>.",
+            f"🔢 <b>Set Total Episode</b>\n\n"
+            f"Send the total number (current: <code>{settings['total_episode']}</code>).",
             parse_mode=ParseMode.HTML
         )
         last_bot_messages[chat_id] = sent.id
 
+# CONTINUATION OF CALLBACK HANDLER FROM PART 8
+    # This continues the @app.on_callback_query() function
+    
     elif data == "quality_menu":
         sent = await callback_query.message.reply(
             "🎥 <b>Quality Settings</b>\n\n"
@@ -1083,6 +1104,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             else:
                 selected_qualities.append(quality)
                 
+            # Sort qualities in the order they appear in ALL_QUALITIES
             selected_qualities.sort(key=lambda q: ALL_QUALITIES.index(q))
             
             settings['selected_qualities'] = selected_qualities
@@ -1141,7 +1163,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             f"📺 <b>Progress:</b>\n"
             f"• Season: <code>{settings['season']}</code>\n"
             f"• Episode: <code>{settings['episode']}</code>\n"
-            f"• Total Qualities: <code>{settings['total_episode']}</code>\n\n"
+            f"• Total Episodes: <code>{settings['total_episode']}</code>\n\n"
             f"🎯 <b>Channel:</b> {channel_status}",
             parse_mode=ParseMode.HTML,
             reply_markup=get_menu_markup()
@@ -1149,6 +1171,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         last_bot_messages[chat_id] = sent.id
 
     elif data == "back_to_main":
+        # Clear any waiting input state
         if user_id in waiting_for_input:
             del waiting_for_input[user_id]
         if f"{user_id}_welcome_data" in waiting_for_input:
@@ -1180,6 +1203,7 @@ async def handle_buttons(client, callback_query: CallbackQuery):
         last_bot_messages[chat_id] = sent.id
 
     elif data == "cancel":
+        # Clear any waiting input state
         if user_id in waiting_for_input:
             del waiting_for_input[user_id]
         if f"{user_id}_welcome_data" in waiting_for_input:
@@ -1189,9 +1213,13 @@ async def handle_buttons(client, callback_query: CallbackQuery):
             await callback_query.message.delete()
         except:
             pass
+        
+        # Don't send a new message, just delete the current one
 
 
-# --- WEB SERVER AND CONCURRENT EXECUTION ---
+# ===== END OF HANDLERS =====
+# Next: Part 10 contains Web Server & Main Function
+# ===== WEB SERVER AND CONCURRENT EXECUTION =====
 
 async def health_check(request):
     """Health check endpoint for Render to keep the service alive."""
@@ -1200,6 +1228,7 @@ async def health_check(request):
         logger.warning("⚠️ Health check found zero handlers. Bot may be non-responsive.")
     
     return web.Response(text=f"Bot Running. Handlers found: {total_handlers_registered}", status=200)
+
 
 async def self_ping():
     """Pings the health check endpoint periodically to keep the Render service awake."""
@@ -1219,10 +1248,11 @@ async def self_ping():
                 else:
                     logger.debug(f"Self-ping successful (Status {response.status_code}).")
                 
-                await asyncio.sleep(600)
+                await asyncio.sleep(600)  # Ping every 10 minutes
             except Exception as e:
                 logger.error(f"❌ Self-ping error: {e}")
                 await asyncio.sleep(600)
+
 
 async def start_web_server():
     """Sets up the web application and binds to the Render port."""
@@ -1236,8 +1266,10 @@ async def start_web_server():
     logger.info(f"🌐 Starting web server on 0.0.0.0:{PORT}")
     await site.start()
     
+    # Keep web server running
     while True:
         await asyncio.sleep(3600)
+
 
 async def run_forever():
     """Keeps the Pyrogram client's event loop running indefinitely."""
@@ -1247,9 +1279,12 @@ async def run_forever():
 
 
 async def main():
+    """Main execution function"""
+    # Initialize database
     await init_db()
     
     try:
+        # Start Pyrogram client
         await app.start()
         logger.info("✅ Pyrogram Client started successfully.")
         
@@ -1258,6 +1293,7 @@ async def main():
         logger.info("✅ ALL SYSTEMS OPERATIONAL")
         logger.info("=" * 50)
         
+        # Run all tasks concurrently
         await asyncio.gather(
             run_forever(),
             start_web_server(),
