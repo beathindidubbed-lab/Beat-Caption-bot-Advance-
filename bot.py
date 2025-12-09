@@ -1544,6 +1544,22 @@ async def main():
         logger.info("📡 Starting Pyrogram client...")
         await app.start()
         logger.info("✅ Pyrogram client started successfully")
+
+        # FORCE REGISTER HANDLERS
+        from pyrogram import filters
+        from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+        
+        app.add_handler(MessageHandler(start_handler, filters.private & filters.command("start")))
+        app.add_handler(MessageHandler(help_handler, filters.private & filters.command("help")))
+        app.add_handler(MessageHandler(stats_handler, filters.private & filters.command("stats")))
+        app.add_handler(MessageHandler(admin_handler, filters.private & filters.command("admin")))
+        app.add_handler(MessageHandler(text_input_handler, filters.private & (filters.text | filters.sticker) & filters.incoming & ~filters.command(["start", "help", "stats", "admin"])))
+        app.add_handler(MessageHandler(forward_handler, filters.private & filters.forwarded))
+        app.add_handler(MessageHandler(media_handler, filters.private & (filters.photo | filters.video | filters.animation)))
+        app.add_handler(MessageHandler(video_handler, filters.private & filters.video & ~filters.forwarded & ~filters.media_group))
+        app.add_handler(CallbackQueryHandler(callback_handler))
+        
+        logger.info("✅ MANUALLY REGISTERED 9 HANDLERS")
         
         # Verify handlers are registered
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
@@ -1614,4 +1630,5 @@ if __name__ == "__main__":
         logger.error(f"❌ Top-level error: {e}", exc_info=True)
     finally:
         logger.info("👋 Bot terminated")
+
 
