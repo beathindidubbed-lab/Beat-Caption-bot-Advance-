@@ -784,6 +784,11 @@ async def webhook_handler(request):
 async def health(request):
     return web.Response(text='OK', status=200)
 
+# ======= NEW (minimal) root for UptimeRobot =======
+async def root(request):
+    return web.Response(text='OK', status=200)
+# ====================================================
+
 async def self_ping_loop():
     if not SELF_PING_URL:
         return
@@ -795,86 +800,25 @@ async def self_ping_loop():
                 logger.exception('Self-ping failed')
             await asyncio.sleep(300)
 
-# ---- New: Bot monitor / keepalive ----
-# Purpose: keep the pyrogram Client alive, detect disconnects and attempt to restart
-async def _bot_monitor_loop():
-    # conservative timings
-    ping_interval = 180  # seconds between get_me calls to keep connection alive
-    reconnect_delay = 5   # short wait before trying to restart after failure
-    longer_sleep = 30     # sleep if everything ok
-
-    while True:
-        try:
-            # if the bot is not connected, try to start it
-            if not bot.is_connected:
-                logger.warning('Bot monitor: client not connected — attempting start()')
-                try:
-                    await bot.start()
-                    logger.info('Bot monitor: client started successfully')
-                    # if webhook mode, re-set webhook if provided
-                    if WEBHOOK_URL:
-                        try:
-                            await bot.set_webhook(WEBHOOK_URL)
-                            logger.info('Webhook re-set to %s', WEBHOOK_URL)
-                        except Exception:
-                            logger.exception('Failed to re-set webhook from monitor')
-                except Exception:
-                    logger.exception('Bot monitor: failed to start client; retrying after delay')
-                    await asyncio.sleep(reconnect_delay)
-                    continue
-
-            # Try a light API call to keep the connection alive and detect issues
-            try:
-                await bot.get_me()
-            except Exception:
-                logger.exception('Bot monitor: get_me failed; will attempt restart')
-                # attempt restart cycle
-                try:
-                    await bot.stop()
-                except Exception:
-                    pass
-                await asyncio.sleep(reconnect_delay)
-                continue
-
-            # everything seemed ok; wait a bit
-            await asyncio.sleep(ping_interval)
-        except asyncio.CancelledError:
-            logger.info('Bot monitor loop cancelled')
-            break
-        except Exception:
-            logger.exception('Unexpected exception in bot monitor loop; sleeping briefly and retrying')
-            await asyncio.sleep(reconnect_delay)
-
 # Startup & shutdown
 async def on_startup(app):
     await init_db()
     try:
+        # ======= FIX: delete any existing webhook so polling receives updates =======
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            logger.exception('Failed to delete existing webhook (continuing)')
+        # ========================================================================
         await bot.start()
     except Exception:
         logger.exception('Failed to start bot')
-
-    # if webhook url defined, set it (safe to try)
-    if WEBHOOK_URL:
-        try:
-            await bot.set_webhook(WEBHOOK_URL)
-            logger.info('Webhook set to %s', WEBHOOK_URL)
-        except Exception:
-            logger.exception('Failed to set webhook')
-
-    # create self-ping task (user-provided)
+    # NOTE: set_webhook removed to avoid polling vs webhook conflict
     app['self_ping'] = asyncio.create_task(self_ping_loop())
 
-    # create the bot monitor/keepalive task
-    app['bot_monitor'] = asyncio.create_task(_bot_monitor_loop())
-    logger.info('Bot monitor started')
-
 async def on_shutdown(app):
-    # cancel monitor & self ping
     if app.get('self_ping'):
         app['self_ping'].cancel()
-    if app.get('bot_monitor'):
-        app['bot_monitor'].cancel()
-
     try:
         await bot.stop()
     except Exception:
@@ -890,7 +834,11 @@ async def on_shutdown(app):
         except Exception:
             pass
 
-web_app.add_routes([web.post('/webhook', webhook_handler), web.get('/health', health)])
+web_app.add_routes([
+    web.post('/webhook', webhook_handler),
+    web.get('/health', health),
+    web.get('/', root)     # UptimeRobot / health ping endpoint (minimal, non-invasive)
+])
 web_app.on_startup.append(on_startup)
 web_app.on_shutdown.append(on_shutdown)
 
