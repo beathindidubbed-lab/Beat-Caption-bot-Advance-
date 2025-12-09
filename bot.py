@@ -49,7 +49,7 @@ API_HASH = os.getenv('API_HASH', '')
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
 WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '') # IMPORTANT: Ensure this is set to your Render URL (e.g., https://your-app.onrender.com)
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
 DATA_FILE = Path(os.getenv('DATA_FILE', 'data.json'))
 DATABASE_URL = os.getenv('DATABASE_URL')
 SELF_PING_URL = os.getenv('SELF_PING_URL')
@@ -769,10 +769,8 @@ async def webhook_handler(request):
         if not body:
             return web.Response(status=400, text='No body')
         try:
-            # Pyrogram 2.0 uses process_raw_update for handling raw webhook data
-            await bot.process_raw_update(body) 
-        except Exception:
-            # Fallback for process_update if raw processing fails (though less common in webhook setup)
+            await bot.process_raw_update(body)
+        except AttributeError:
             try:
                 data = await request.json()
                 await bot.process_update(data)
@@ -806,23 +804,36 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # ======= FIX: Removed non-existent bot.delete_webhook() and added bot.set_webhook() =======
-        # NOTE: bot.delete_webhook is for Pyrogram v1 and caused an AttributeError.
-        
         await bot.start()
         
-        # === FIX: Explicitly set the webhook URL after the bot client starts ===
+        # ==================== START OF FIX ====================
         if WEBHOOK_URL:
             # Construct the full webhook URL (e.g., https://your-app.onrender.com/webhook)
             full_webhook_url = WEBHOOK_URL.rstrip('/') + '/webhook'
-            await bot.set_webhook(full_webhook_url)
-            logger.info(f'Webhook successfully set to: {full_webhook_url}')
-        # =========================================================================================
-
+            
+            # 1. Delete any existing webhook using the raw API method
+            # This handles the problematic 'delete_webhook' call from the previous attempt
+            await bot.send("deleteWebhook", {"drop_pending_updates": True})
+            
+            # 2. Set the new webhook URL using the raw API method (Pyrogram 2.0 compatible)
+            result = await bot.send(
+                "setWebhook",
+                {
+                    "url": full_webhook_url,
+                    "drop_pending_updates": True,
+                    "max_connections": 40
+                }
+            )
+            
+            if result.get('ok') is True:
+                logger.info(f'Webhook successfully set to: {full_webhook_url}')
+            else:
+                logger.error(f'Failed to set webhook: {result}')
+        # ===================== END OF FIX =====================
+        
     except Exception:
         logger.exception('Failed to start bot or set webhook')
     
-    # NOTE: set_webhook removed to avoid polling vs webhook conflict
     app['self_ping'] = asyncio.create_task(self_ping_loop())
 
 async def on_shutdown(app):
