@@ -79,8 +79,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=8,
-    in_memory=True
+    workers=8
 )
 
 logger.info("🔧 Pyrogram Client initialized")
@@ -477,6 +476,11 @@ def get_channel_set_markup():
 
 
 # ===== MESSAGE HANDLERS =====
+
+async def start_handler(client, message):
+    """Handle /start command"""
+    logger.critical("🔴 START HANDLER CALLED!")  # Add this line
+    logger.info(f"📨 /start from user {message.from_user.id}")
 
 @app.on_message(filters.private & filters.command("start"))
 async def start_handler(client, message):
@@ -1544,7 +1548,13 @@ async def main():
         # Verify handlers are registered
         total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
         logger.info(f"📋 Registered handlers: {total_handlers}")
-        
+
+        # Debug: List all registered handlers
+        for group_id, handlers_list in app.dispatcher.groups.items():
+            logger.info(f"Group {group_id}: {len(handlers_list)} handlers")
+            for handler in handlers_list:
+                logger.info(f"  - {handler.__class__.__name__}")
+
         if total_handlers == 0:
             logger.error("❌ CRITICAL: No handlers registered!")
             logger.error("❌ Bot will not respond to messages!")
@@ -1591,6 +1601,12 @@ async def main():
 if __name__ == "__main__":
     try:
         logger.info("🎬 Bot script starting...")
+        
+        # Force module to execute and register decorators
+        import sys
+        logger.info(f"✅ Module loaded: {__name__}")
+        logger.info(f"✅ App object: {app}")
+        
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("⌨️ Keyboard interrupt received. Shutting down...")
@@ -1598,3 +1614,4 @@ if __name__ == "__main__":
         logger.error(f"❌ Top-level error: {e}", exc_info=True)
     finally:
         logger.info("👋 Bot terminated")
+
