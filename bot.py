@@ -806,7 +806,8 @@ async def on_startup(app):
     try:
         # ======= FIX: delete any existing webhook so polling receives updates =======
         try:
-            await bot.delete_webhook(drop_pending_updates=True)
+            # NOTE: Removed bot.delete_webhook() as it is Pyrogram v1 syntax, causing AttributeError in v2.
+            pass 
         except Exception:
             logger.exception('Failed to delete existing webhook (continuing)')
         # ========================================================================
