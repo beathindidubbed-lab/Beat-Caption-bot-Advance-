@@ -804,36 +804,17 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
+        # The webhook deletion logic below was causing an AttributeError in some Pyrogram versions.
+        # Removed the problematic block to allow bot startup to proceed.
+        #
+        # try:
+        #     await bot.delete_webhook(drop_pending_updates=True)
+        # except Exception:
+        #     logger.exception('Failed to delete existing webhook (continuing)')
         await bot.start()
-        
-        # ==================== START OF FIX ====================
-        if WEBHOOK_URL:
-            # Construct the full webhook URL (e.g., https://your-app.onrender.com/webhook)
-            full_webhook_url = WEBHOOK_URL.rstrip('/') + '/webhook'
-            
-            # 1. Delete any existing webhook using the raw API method
-            # This handles the problematic 'delete_webhook' call from the previous attempt
-            await bot.send("deleteWebhook", {"drop_pending_updates": True})
-            
-            # 2. Set the new webhook URL using the raw API method (Pyrogram 2.0 compatible)
-            result = await bot.send(
-                "setWebhook",
-                {
-                    "url": full_webhook_url,
-                    "drop_pending_updates": True,
-                    "max_connections": 40
-                }
-            )
-            
-            if result.get('ok') is True:
-                logger.info(f'Webhook successfully set to: {full_webhook_url}')
-            else:
-                logger.error(f'Failed to set webhook: {result}')
-        # ===================== END OF FIX =====================
-        
     except Exception:
-        logger.exception('Failed to start bot or set webhook')
-    
+        logger.exception('Failed to start bot')
+    # NOTE: set_webhook removed to avoid polling vs webhook conflict
     app['self_ping'] = asyncio.create_task(self_ping_loop())
 
 async def on_shutdown(app):
