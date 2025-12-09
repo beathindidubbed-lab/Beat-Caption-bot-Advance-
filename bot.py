@@ -1511,7 +1511,7 @@ async def run_forever():
     await asyncio.sleep(2)
     
     # Verify handlers
-    total_handlers = len(app.dispatcher.handlers)
+    total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
     logger.info(f"📋 Total handlers registered: {total_handlers}")
     
     if total_handlers == 0:
@@ -1588,8 +1588,8 @@ async def main():
         logger.info("✅ MANUALLY REGISTERED 9 HANDLERS")
         logger.info(f"🔍 Dispatcher object: {app.dispatcher}")
         logger.info(f"🔍 Dispatcher groups: {app.dispatcher.groups}")
-        logger.info(f"🔍 Dispatcher handlers: {len(app.dispatcher.handlers)}")
-
+        total = sum(len(h) for h in app.dispatcher.groups.values())
+        logger.info(f"🔍 Total handlers across all groups: {total}")
         
         # Run all tasks concurrently
         await asyncio.gather(
@@ -1635,6 +1635,7 @@ if __name__ == "__main__":
         logger.error(f"❌ Top-level error: {e}", exc_info=True)
     finally:
         logger.info("👋 Bot terminated")
+
 
 
 
