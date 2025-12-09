@@ -1511,7 +1511,7 @@ async def run_forever():
     await asyncio.sleep(2)
     
     # Verify handlers
-    total_handlers = sum(len(handlers) for handlers in app.dispatcher.groups.values())
+    total_handlers = len(app.dispatcher.handlers)
     logger.info(f"📋 Total handlers registered: {total_handlers}")
     
     if total_handlers == 0:
@@ -1622,6 +1622,10 @@ if __name__ == "__main__":
         import sys
         logger.info(f"✅ Module loaded: {__name__}")
         logger.info(f"✅ App object: {app}")
+        logger.info("✅ MANUALLY REGISTERED 9 HANDLERS")
+        logger.info(f"🔍 Dispatcher object: {app.dispatcher}")
+        logger.info(f"🔍 Dispatcher groups: {app.dispatcher.groups}")
+        logger.info(f"🔍 Dispatcher handlers: {len(app.dispatcher.handlers)}")
         
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -1630,5 +1634,6 @@ if __name__ == "__main__":
         logger.error(f"❌ Top-level error: {e}", exc_info=True)
     finally:
         logger.info("👋 Bot terminated")
+
 
 
