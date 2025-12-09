@@ -1585,6 +1585,11 @@ async def main():
         logger.info("   • Web Server (Health Check)")
         logger.info("   • Self-Ping (24/7 Uptime)")
         logger.info("=" * 60)
+        logger.info("✅ MANUALLY REGISTERED 9 HANDLERS")
+        logger.info(f"🔍 Dispatcher object: {app.dispatcher}")
+        logger.info(f"🔍 Dispatcher groups: {app.dispatcher.groups}")
+        logger.info(f"🔍 Dispatcher handlers: {len(app.dispatcher.handlers)}")
+
         
         # Run all tasks concurrently
         await asyncio.gather(
@@ -1621,11 +1626,7 @@ if __name__ == "__main__":
         # Force module to execute and register decorators
         import sys
         logger.info(f"✅ Module loaded: {__name__}")
-        logger.info(f"✅ App object: {app}")
-        logger.info("✅ MANUALLY REGISTERED 9 HANDLERS")
-        logger.info(f"🔍 Dispatcher object: {app.dispatcher}")
-        logger.info(f"🔍 Dispatcher groups: {app.dispatcher.groups}")
-        logger.info(f"🔍 Dispatcher handlers: {len(app.dispatcher.handlers)}")
+        logger.info(f"✅ App object: {app}")       
         
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -1634,6 +1635,7 @@ if __name__ == "__main__":
         logger.error(f"❌ Top-level error: {e}", exc_info=True)
     finally:
         logger.info("👋 Bot terminated")
+
 
 
 
