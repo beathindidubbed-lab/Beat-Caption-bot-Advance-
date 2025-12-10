@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-bot.py — Pyrogram bot with long polling (Render-ready)
-"""
-
 # ==================== PART 1: IMPORTS AND CONFIGURATION ====================
 
 import os
@@ -11,7 +6,6 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
-from pyrogram import Client, filters, idle, StopPropagation
 
 # Optional DB drivers
 try:
@@ -27,12 +21,18 @@ except Exception:
     AsyncConnectionPool = None
 
 from aiohttp import web, ClientSession
-from pyrogram import Client, filters, idle  # ⚠️ IMPORTANT: idle imported here
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
 
 # ---- Logging ----
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # ---- Config ----
@@ -43,15 +43,32 @@ WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
 WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
 DATA_FILE = Path(os.getenv('DATA_FILE', 'data.json'))
 DATABASE_URL = os.getenv('DATABASE_URL')
-SELF_PING_URL = os.getenv('SELF_PING_URL')
-ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
+SELF_PING_URL = os.getenv('SELF_PING_URL', os.getenv('RENDER_EXTERNAL_URL', ''))
+ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '').strip()
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip().isdigit()] if ADMIN_IDS_STR else []
 
 if not BOT_TOKEN or not API_HASH or API_ID == 0:
-    logger.warning('BOT_TOKEN, API_ID or API_HASH missing. Set env vars.')
+    logger.error('❌ BOT_TOKEN, API_ID or API_HASH missing. Set environment variables!')
+    exit(1)
+
+logger.info(f'🔑 API_ID: {API_ID}')
+logger.info(f'🔑 API_HASH: {"*" * len(API_HASH) if API_HASH else "NOT SET"}')
+logger.info(f'🤖 BOT_TOKEN: {"*" * 20 if BOT_TOKEN else "NOT SET"}')
+
+if ADMIN_IDS:
+    logger.info(f'🔧 Admin IDs configured: {ADMIN_IDS}')
+else:
+    logger.warning('⚠️ No admin IDs configured. Admin features will be disabled.')
 
 # ---- App objects ----
 web_app = web.Application()
-bot = Client('uploader_bot', api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = Client(
+    'uploader_bot',
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workers=4  # Add this
+)
 
 # ---- DB globals ----
 _pg_pool = None
