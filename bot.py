@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """
 bot.py — Pyrogram webhook bot (single-file, Render-ready)
-
-Full features:
-- Webhook mode (aiohttp)
-- Optional Postgres (asyncpg or psycopg+psycopg_pool)
-- JSON fallback storage if DB driver unavailable
-- Per-user settings: season/episode/total, qualities, caption template, target channel
-- Inline-button menus: preview, set caption, set season/episode/total, quality toggles, set channel, stats, reset
-- Admin panel: set/preview welcome message, global stats
-- Welcome media (photo/video/animation) + caption
-- Upload flow: copy media to target channel, cycle qualities, auto-increment episode, log uploads
-- Health endpoint and optional self-ping
 """
 
 import os
@@ -76,7 +65,7 @@ waiting_for_input = {}
 
 # ---- Defaults ----
 ALL_QUALITIES = ['480p', '720p', '1080p', '4K', '2160p']
-DEFAULT_CAPTION = """• 𝗦𝗘𝗔𝗦𝗢𝗡 {season} || Episode {episode} ({quality})\\n{total_episode_text}"""
+DEFAULT_CAPTION = """• 𝗦𝗘𝗔𝗦𝗢𝗡 {season} || Episode {episode} ({quality})\n{total_episode_text}"""
 
 # ---- Fallback file helpers ----
 def load_fallback():
@@ -119,7 +108,6 @@ async def init_db():
     if DATABASE_URL and psycopg is not None and AsyncConnectionPool is not None:
         try:
             _psycopg_pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=10)
-            await _psycopg_pool.open()
             USE_PSYCOG = True
             logger.info('Connected to Postgres via psycopg')
             async with _psycopg_pool.connection() as conn:
@@ -268,7 +256,6 @@ async def handle_start(c: Client, m: Message):
     except Exception:
         pass
 
-    # attempt to show custom welcome if present
     welcome = await _get_welcome()
     if welcome and welcome.get('file_id'):
         caption = (welcome.get('caption') or '').format(first_name=first_name, user_id=user_id)
@@ -286,12 +273,12 @@ async def handle_start(c: Client, m: Message):
         except Exception:
             logger.exception('Failed sending welcome media')
 
-    text = (f"""👋 <b>Welcome {first_name}!</b>\\n\\n"""
-            """🤖 <b>Your Upload Assistant</b>\\n\\n"""
-            """• Auto-caption and forward videos\\n"""
-            """• Multi-quality support\\n"""
-            """• Episode tracking (per user)\\n"""
-            """• Channel setup and preview\\n\\n"""
+    text = (f"""👋 <b>Welcome {first_name}!</b>\n\n"""
+            """🤖 <b>Your Upload Assistant</b>\n\n"""
+            """• Auto-caption and forward videos\n"""
+            """• Multi-quality support\n"""
+            """• Episode tracking (per user)\n"""
+            """• Channel setup and preview\n\n"""
             """Start by setting your target channel and caption.""")
     sent = await c.send_message(m.chat.id, text, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
@@ -303,7 +290,7 @@ async def handle_help(c: Client, m: Message):
     except:
         pass
     await _delete_last(c, m.chat.id)
-    text = ("/start - Open menu\\n/help - This help\\n/stats - Your stats\\n/admin - Admin panel (admins only)")
+    text = ("/start - Open menu\n/help - This help\n/stats - Your stats\n/admin - Admin panel (admins only)")
     sent = await c.send_message(m.chat.id, text, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
 
@@ -317,13 +304,13 @@ async def handle_stats(c: Client, m: Message):
     except:
         pass
     await _delete_last(c, m.chat.id)
-    text = (f"📊 <b>Your Statistics</b>\\n\\n"
-            f"👤 User ID: <code>{user_id}</code>\\n"
-            f"📤 Total: <code>{total}</code> | Today: <code>{today}</code>\\n\\n"
-            f"📺 Season: <code>{settings['season']}</code>\\n"
-            f"🎬 Episode: <code>{settings['episode']}</code>\\n"
-            f"🔢 Total Episodes: <code>{settings['total_episode']}</code>\\n"
-            f"🎥 Progress: <code>{settings['video_count']}/{len(settings['selected_qualities'])}</code>\\n"
+    text = (f"📊 <b>Your Statistics</b>\n\n"
+            f"👤 User ID: <code>{user_id}</code>\n"
+            f"📤 Total: <code>{total}</code> | Today: <code>{today}</code>\n\n"
+            f"📺 Season: <code>{settings['season']}</code>\n"
+            f"🎬 Episode: <code>{settings['episode']}</code>\n"
+            f"🔢 Total Episodes: <code>{settings['total_episode']}</code>\n"
+            f"🎥 Progress: <code>{settings['video_count']}/{len(settings['selected_qualities'])}</code>\n"
             f"🎯 Channel: <code>{settings['target_chat_id']}</code>")
     sent = await c.send_message(m.chat.id, text, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
@@ -341,7 +328,6 @@ async def handle_admin(c: Client, m: Message):
     sent = await c.send_message(m.chat.id, '👑 Admin Panel', parse_mode=ParseMode.HTML, reply_markup=admin_markup())
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
 
-# Text input handler for modes like caption, season, episode, channel id, admin welcome caption
 @bot.on_message(filters.private & (filters.text | filters.sticker) & ~filters.command(['start', 'help', 'stats', 'admin']))
 async def handle_text_input(c: Client, m: Message):
     user_id = m.from_user.id
@@ -431,7 +417,6 @@ async def handle_text_input(c: Client, m: Message):
                 await c.send_message(m.chat.id, '❌ Failed to save welcome')
             return
 
-# Forward handler for channel setup (user forwards a message from channel)
 @bot.on_message(filters.private & filters.forwarded)
 async def handle_forward(c: Client, m: Message):
     user_id = m.from_user.id
@@ -455,7 +440,6 @@ async def handle_forward(c: Client, m: Message):
     sent = await c.send_message(m.chat.id, f'✅ Channel set: {chat.title} ({chat.id})', reply_markup=menu_markup())
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
 
-# Media handler for admin welcome flow (admin sends photo/video/animation)
 @bot.on_message(filters.private & (filters.photo | filters.video | filters.animation))
 async def handle_media_admin(c: Client, m: Message):
     user_id = m.from_user.id
@@ -488,7 +472,6 @@ async def handle_media_admin(c: Client, m: Message):
     sent = await c.send_message(m.chat.id, '✅ Media received. Now send caption (HTML ok).')
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
 
-# Main upload handler — user sends a video
 @bot.on_message(filters.private & filters.video & ~filters.forwarded)
 async def handle_video_upload(c: Client, m: Message):
     user_id = m.from_user.id
@@ -523,7 +506,6 @@ async def handle_video_upload(c: Client, m: Message):
             logger.exception('Upload error')
             await m.reply(f'❌ Upload failed: {e}')
 
-# Callback query handler for all inline buttons
 @bot.on_callback_query()
 async def handle_callback(c: Client, cq: CallbackQuery):
     data = cq.data
@@ -533,7 +515,6 @@ async def handle_callback(c: Client, cq: CallbackQuery):
     await cq.answer()
     await _delete_last(c, chat_id)
 
-    # Admin
     if data == 'admin_set_welcome' and user_id in ADMIN_IDS:
         waiting_for_input[user_id] = 'admin_welcome'
         sent = await cq.message.reply('Send a photo/video/animation for welcome (admins only).')
@@ -548,11 +529,11 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         cap = (w.get('caption') or '').format(first_name='Test', user_id=0)
         try:
             if w.get('message_type') == 'photo':
-                await c.send_photo(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
+                await c.send_photo(chat_id, w['file_id'], caption=f'👁️ Preview\n{cap}', parse_mode=ParseMode.HTML)
             elif w.get('message_type') == 'video':
-                await c.send_video(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
+                await c.send_video(chat_id, w['file_id'], caption=f'👁️ Preview\n{cap}', parse_mode=ParseMode.HTML)
             elif w.get('message_type') == 'animation':
-                await c.send_animation(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
+                await c.send_animation(chat_id, w['file_id'], caption=f'👁️ Preview\n{cap}', parse_mode=ParseMode.HTML)
         except Exception as e:
             await c.send_message(chat_id, f'Preview failed: {e}')
         sent = await c.send_message(chat_id, 'Admin menu', reply_markup=admin_markup())
@@ -564,13 +545,12 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
 
-    # User actions
     if data == 'preview':
         target = settings.get('target_chat_id')
         target_disp = f'<code>{target}</code>' if target else '❌ Not set'
         next_q = settings['selected_qualities'][settings['video_count'] % len(settings['selected_qualities'])] if settings['selected_qualities'] else 'N/A'
         preview = render_caption(settings.get('base_caption', DEFAULT_CAPTION), settings, next_q)
-        sent = await cq.message.reply(f'🔍 Caption Preview:\\n{preview}\\n\\nChannel: {target_disp}', parse_mode=ParseMode.HTML, reply_markup=menu_markup())
+        sent = await cq.message.reply(f'🔍 Caption Preview:\n{preview}\n\nChannel: {target_disp}', parse_mode=ParseMode.HTML, reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
     if data == 'set_caption':
@@ -653,7 +633,7 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
 
-# Additional helper DB/style functions used by handlers
+# Helper functions
 async def _save_channel_info(user_id, chat):
     if USE_ASYNCPG and _pg_pool:
         async with _pg_pool.acquire() as conn:
@@ -765,33 +745,21 @@ async def _delete_last(client, chat_id):
 # Webhook & health endpoints
 async def webhook_handler(request):
     try:
-        # Read the raw body first to get data from Telegram
         body = await request.read()
         if not body:
             return web.Response(status=400, text='No data')
-            
-        # Parse the JSON body
-        data = json.loads(body)
-
-        # Pyrogram 2.x Fix: The 'Client' object lacks 'process_update', so we fall back
-        # to the plural method 'process_updates', which accepts a list.
-        await bot.process_updates([data])
-
-        # Always return 200 (OK) to Telegram on success or *after logging* an error
+        
         return web.Response(status=200, text='OK')
         
     except Exception:
-        # Log the error, but still return 200 (OK) to Telegram to prevent retries.
         logger.exception('Webhook handler error')
         return web.Response(status=200, text='Error occurred, but acknowledged')
 
 async def health(request):
     return web.Response(text='OK', status=200)
 
-# ======= NEW (minimal) root for UptimeRobot =======
 async def root(request):
     return web.Response(text='OK', status=200)
-# ====================================================
 
 async def self_ping_loop():
     if not SELF_PING_URL:
@@ -808,19 +776,22 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # Attempt to delete webhook (Pyrogram 2.x method)
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-        except AttributeError:
-            # Expected in some environments/versions. Ignore silently and continue.
-            pass 
-        except Exception:
-            logger.exception('Failed to delete existing webhook (continuing)')
-        
         await bot.start()
+        
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/webhook"
+            try:
+                await bot.delete_webhook(drop_pending_updates=True)
+                await bot.set_webhook(webhook_url)
+                logger.info(f'Webhook set to: {webhook_url}')
+            except Exception:
+                logger.exception('Failed to set webhook')
+        else:
+            logger.warning('WEBHOOK_URL not set - bot will not receive updates!')
+            
     except Exception:
         logger.exception('Failed to start bot')
-    # NOTE: set_webhook removed to avoid polling vs webhook conflict
+    
     app['self_ping'] = asyncio.create_task(self_ping_loop())
 
 async def on_shutdown(app):
@@ -844,7 +815,7 @@ async def on_shutdown(app):
 web_app.add_routes([
     web.post('/webhook', webhook_handler),
     web.get('/health', health),
-    web.get('/', root)     # UptimeRobot / health ping endpoint (minimal, non-invasive)
+    web.get('/', root)
 ])
 web_app.on_startup.append(on_startup)
 web_app.on_shutdown.append(on_shutdown)
