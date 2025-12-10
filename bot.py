@@ -553,17 +553,11 @@ async def handle_callback(c: Client, cq: CallbackQuery):
                 await c.send_video(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
             elif w.get('message_type') == 'animation':
                 await c.send_animation(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
-            except Exception as e:
-                await c.send_message(chat_id, f'Preview failed: {e}')
-            sent = await c.send_message(chat_id, 'Admin menu', reply_markup=admin_markup())
-            last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
-            return
         except Exception as e:
             await c.send_message(chat_id, f'Preview failed: {e}')
         sent = await c.send_message(chat_id, 'Admin menu', reply_markup=admin_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
-
     if data == 'admin_global_stats' and user_id in ADMIN_IDS:
         total = await _get_all_users_count()
         sent = await cq.message.reply(f'Global users: {total} | Storage: {"Postgres" if (USE_ASYNCPG or USE_PSYCOG) else "JSON"}')
@@ -771,18 +765,18 @@ async def _delete_last(client, chat_id):
 # Webhook & health endpoints
 async def webhook_handler(request):
     try:
-        data = await request.json() # Already parsed to dict
+        data = await request.json() # Parse JSON data from the request body
         if not data:
             return web.Response(status=400, text='No data')
         
-        # FINAL FIX: Use the Client's top-level method to process raw updates.
-        # This is the correct, official way to feed updates to a Pyrogram Client 
-        # in a manual webhook scenario. It expects a list of updates.
+        # FIX: Use the correct Pyrogram method for processing raw updates.
+        # This resolves the previous AttributeError (process_update) 
+        # and simplifies the error handling.
         await bot.process_updates([data]) 
         
         return web.Response(status=200, text='OK')
     except Exception:
-        # Log the error, but still return 200 (OK) to Telegram to prevent it from retrying this update constantly.
+        # Log the error, but still return 200 (OK) to Telegram to prevent retries.
         logger.exception('Webhook handler error') 
         return web.Response(status=200, text='Error occurred, but acknowledged')
 
@@ -809,8 +803,14 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # The bot must call start() to initialize its session and register handlers with Pyrogram.
-        await bot.start() 
+        # ======= FIX: delete any existing webhook so polling receives updates =======
+        # This prevents the bot from being stuck in a non-webhook state if it starts without one set.
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            logger.exception('Failed to delete existing webhook (continuing)')
+        # ========================================================================
+        await bot.start()
     except Exception:
         logger.exception('Failed to start bot')
     
