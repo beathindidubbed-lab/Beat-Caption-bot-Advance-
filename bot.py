@@ -783,33 +783,14 @@ async def _delete_last(client, chat_id):
 
 # ==================== END OF PART 7 ====================
 
-# ==================== PART 8: WEBHOOK & STARTUP/SHUTDOWN ====================
+# ==================== PART 8: WEBHOOK & STARTUP/SHUTDOWN (FIXED) ====================
 
 # Webhook & health endpoints
-async def webhook_handler(request):
-    try:
-        body = await request.read()
-        if not body:
-            return web.Response(status=400, text='No data')
-        
-        # Parse update and handle it
-        update_data = json.loads(body.decode('utf-8'))
-        
-        # Create an update object and pass it to handlers
-        # Note: Pyrogram doesn't natively support processing updates from dict
-        # This is a placeholder - actual implementation would need update handling
-        
-        return web.Response(status=200, text='OK')
-        
-    except Exception:
-        logger.exception('Webhook handler error')
-        return web.Response(status=200, text='Error occurred, but acknowledged')
-
 async def health(request):
     return web.Response(text='OK', status=200)
 
 async def root(request):
-    return web.Response(text='OK', status=200)
+    return web.Response(text='Bot Running', status=200)
 
 async def self_ping_loop():
     if not SELF_PING_URL:
@@ -818,57 +799,85 @@ async def self_ping_loop():
         while True:
             try:
                 await sess.get(SELF_PING_URL)
+                logger.info('Self-ping successful')
             except Exception:
                 logger.exception('Self-ping failed')
             await asyncio.sleep(300)
 
-# Startup & shutdown
-async def on_startup(app):
-    await init_db()
+# Main function to run bot and web server together
+async def main():
+    """Run both web app and bot together with long polling"""
     try:
+        # Initialize database
+        await init_db()
+        
+        # Start the bot with long polling
         await bot.start()
-        logger.info('Bot started successfully')
+        logger.info('✅ Bot started successfully with long polling mode')
         
-        # Note: Pyrogram Client doesn't have webhook methods like delete_webhook/set_webhook
-        # You would need to use bot API directly or use python-telegram-bot for webhook support
-        # For now, bot is running in long polling mode via bot.start()
+        # Start web server for health checks
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
+        await site.start()
+        logger.info(f'✅ Web server started on {WEBHOOK_HOST}:{WEBHOOK_PORT}')
         
-        if WEBHOOK_URL:
-            logger.warning('Webhook URL provided but Pyrogram uses long polling. Consider using python-telegram-bot for webhook support.')
+        # Start self-ping task
+        ping_task = asyncio.create_task(self_ping_loop())
+        logger.info('✅ Self-ping task started')
         
-    except Exception:
-        logger.exception('Failed to start bot')
-    
-    app['self_ping'] = asyncio.create_task(self_ping_loop())
-
-async def on_shutdown(app):
-    if app.get('self_ping'):
-        app['self_ping'].cancel()
-    try:
-        await bot.stop()
-    except Exception:
-        logger.exception('Error stopping bot')
-    if USE_PSYCOG and _psycopg_pool:
+        # Keep bot running (this will block until stopped)
+        logger.info('🚀 Bot is now running. Press Ctrl+C to stop.')
+        await idle()
+        
+    except KeyboardInterrupt:
+        logger.info('⚠️ Received stop signal')
+    except Exception as e:
+        logger.exception(f'❌ Error in main: {e}')
+    finally:
+        # Cleanup
+        logger.info('🔄 Cleaning up...')
+        
+        if 'ping_task' in locals():
+            ping_task.cancel()
+        
         try:
-            await _psycopg_pool.close()
-        except Exception:
-            pass
-    if USE_ASYNCPG and _pg_pool:
-        try:
-            await _pg_pool.close()
-        except Exception:
-            pass
+            await bot.stop()
+            logger.info('✅ Bot stopped')
+        except Exception as e:
+            logger.error(f'Error stopping bot: {e}')
+        
+        if 'runner' in locals():
+            try:
+                await runner.cleanup()
+                logger.info('✅ Web server stopped')
+            except Exception as e:
+                logger.error(f'Error stopping web server: {e}')
+        
+        if USE_PSYCOG and _psycopg_pool:
+            try:
+                await _psycopg_pool.close()
+                logger.info('✅ PostgreSQL pool closed (psycopg)')
+            except Exception as e:
+                logger.error(f'Error closing psycopg pool: {e}')
+        
+        if USE_ASYNCPG and _pg_pool:
+            try:
+                await _pg_pool.close()
+                logger.info('✅ PostgreSQL pool closed (asyncpg)')
+            except Exception as e:
+                logger.error(f'Error closing asyncpg pool: {e}')
 
+# Setup web routes (only health checks, no webhook processing)
 web_app.add_routes([
-    web.post('/webhook', webhook_handler),
     web.get('/health', health),
     web.get('/', root)
 ])
-web_app.on_startup.append(on_startup)
-web_app.on_shutdown.append(on_shutdown)
 
 if __name__ == '__main__':
-    logger.info('Starting web app on %s:%s', WEBHOOK_HOST, WEBHOOK_PORT)
-    web.run_app(web_app, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
+    logger.info('='*60)
+    logger.info('🤖 Starting Telegram Bot with Long Polling Mode')
+    logger.info('='*60)
+    asyncio.run(main())
 
 # ==================== END OF PART 8 ====================
