@@ -804,14 +804,10 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # The webhook deletion logic below was causing an AttributeError in some Pyrogram versions.
-        # Removed the problematic block to allow bot startup to proceed.
-        #
-        # try:
-        #     await bot.delete_webhook(drop_pending_updates=True)
-        # except Exception:
-        #     logger.exception('Failed to delete existing webhook (continuing)')
-        await bot.start()
+        # ======= FIX: Use start/stop to initialize session without starting polling =======
+        await bot.start()  # Initialize the session
+        await bot.stop()   # Immediately stop the polling loop (CRITICAL FOR WEBHOOK)
+        # ========================================================================
     except Exception:
         logger.exception('Failed to start bot')
     # NOTE: set_webhook removed to avoid polling vs webhook conflict
