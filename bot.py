@@ -374,7 +374,7 @@ async def handle_text_input(c: Client, m: Message):
             await set_user_settings(user_id, settings)
             del waiting_for_input[user_id]
             sent = await c.send_message(m.chat.id, f'✅ Season set to {settings["season"]}', reply_markup=menu_markup())
-            last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+            last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
             return
         if mode == 'episode':
             if not m.text or not m.text.isdigit():
@@ -385,7 +385,7 @@ async def handle_text_input(c: Client, m: Message):
             await set_user_settings(user_id, settings)
             del waiting_for_input[user_id]
             sent = await c.send_message(m.chat.id, f'✅ Episode set to {settings["episode"]} and progress reset', reply_markup=menu_markup())
-            last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+            last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
             return
         if mode == 'total_episode':
             if not m.text or not m.text.isdigit():
@@ -395,7 +395,7 @@ async def handle_text_input(c: Client, m: Message):
             await set_user_settings(user_id, settings)
             del waiting_for_input[user_id]
             sent = await c.send_message(m.chat.id, f'✅ Total episodes set to {settings["total_episode"]}', reply_markup=menu_markup())
-            last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+            last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
             return
         if mode == 'channel_id':
             text = m.text.strip()
@@ -409,10 +409,10 @@ async def handle_text_input(c: Client, m: Message):
                 await _save_channel_info(user_id, chat)
                 del waiting_for_input[user_id]
                 sent = await c.send_message(m.chat.id, f'✅ Channel set to {chat.title} ({chat.id})', reply_markup=menu_markup())
-                last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+                last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
             except Exception as e:
                 sent = await c.send_message(m.chat.id, f'❌ Failed to set channel: {e}')
-                last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+                last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
             return
         if mode == 'admin_welcome_caption':
             data = waiting_for_input.get(f'{user_id}_welcome_data')
@@ -426,7 +426,7 @@ async def handle_text_input(c: Client, m: Message):
                 del waiting_for_input[user_id]
                 del waiting_for_input[f'{user_id}_welcome_data']
                 sent = await c.send_message(m.chat.id, '✅ Welcome saved', reply_markup=admin_markup())
-                last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+                last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
             else:
                 await c.send_message(m.chat.id, '❌ Failed to save welcome')
             return
@@ -765,14 +765,13 @@ async def _delete_last(client, chat_id):
 # Webhook & health endpoints
 async def webhook_handler(request):
     try:
-        # Telegram sends JSON body. aiohttp's request.json() handles reading and parsing.
-        data = await request.json()
+        data = await request.json() # Already parsed to dict
         if not data:
             return web.Response(status=400, text='No data')
         
-        # FIX: Use the dispatcher's feed_update method, which accepts a parsed dictionary, 
-        # instead of the non-existent process_update methods.
-        await bot.dispatcher.feed_update(data) 
+        # FIX: The correct Pyrogram 2.x method on the dispatcher object to process an incoming update dictionary.
+        # This replaces the non-existent 'feed_update'.
+        await bot.dispatcher.process_update(data) 
         
         return web.Response(status=200, text='OK')
     except Exception:
