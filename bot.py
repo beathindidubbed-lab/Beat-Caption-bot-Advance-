@@ -261,12 +261,20 @@ def channel_markup():
 async def handle_start(c: Client, m: Message):
     user_id = m.from_user.id
     first_name = m.from_user.first_name or 'User'
+    
+    # Get user settings to initialize user in database
     settings = await get_user_settings(user_id)
+    
+    # Delete user's command message
     try:
         await m.delete()
     except Exception:
         pass
 
+    # Delete previous bot message
+    await _delete_last(c, m.chat.id)
+
+    # Try to get custom welcome message
     welcome = await _get_welcome()
     if welcome and welcome.get('file_id'):
         caption = (welcome.get('caption') or '').format(first_name=first_name, user_id=user_id)
@@ -279,20 +287,27 @@ async def handle_start(c: Client, m: Message):
                 sent = await c.send_animation(m.chat.id, welcome['file_id'], caption=caption, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
             else:
                 sent = await c.send_message(m.chat.id, caption or f'Welcome {first_name}!', parse_mode=ParseMode.HTML, reply_markup=menu_markup())
-            last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+            last_bot_msgs[m.chat.id] = sent.id
+            logger.info(f'✅ User {user_id} ({first_name}) started the bot')
             return
-        except Exception:
-            logger.exception('Failed sending welcome media')
+        except Exception as e:
+            logger.error(f'Failed sending welcome media: {e}')
 
-    text = (f"""👋 <b>Welcome {first_name}!</b>\n\n"""
-            """🤖 <b>Your Upload Assistant</b>\n\n"""
-            """• Auto-caption and forward videos\n"""
-            """• Multi-quality support\n"""
-            """• Episode tracking (per user)\n"""
-            """• Channel setup and preview\n\n"""
-            """Start by setting your target channel and caption.""")
+    # Default welcome message
+    text = (f"""👋 <b>Welcome {first_name}!</b>
+
+🤖 <b>Your Upload Assistant</b>
+
+- Auto-caption and forward videos
+- Multi-quality support
+- Episode tracking (per user)
+- Channel setup and preview
+
+Start by setting your target channel and caption.""")
+    
     sent = await c.send_message(m.chat.id, text, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
-    last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+    last_bot_msgs[m.chat.id] = sent.id
+    logger.info(f'✅ User {user_id} ({first_name}) started the bot')
 
 @bot.on_message(filters.private & filters.command('help'))
 async def handle_help(c: Client, m: Message):
@@ -303,7 +318,8 @@ async def handle_help(c: Client, m: Message):
     await _delete_last(c, m.chat.id)
     text = ("/start - Open menu\n/help - This help\n/stats - Your stats\n/admin - Admin panel (admins only)")
     sent = await c.send_message(m.chat.id, text, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
-    last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+    last_bot_msgs[m.chat.id] = sent.id
+    logger.info(f'User {m.from_user.id} used /help')
 
 @bot.on_message(filters.private & filters.command('stats'))
 async def handle_stats(c: Client, m: Message):
@@ -324,12 +340,14 @@ async def handle_stats(c: Client, m: Message):
             f"🎥 Progress: <code>{settings['video_count']}/{len(settings['selected_qualities'])}</code>\n"
             f"🎯 Channel: <code>{settings['target_chat_id']}</code>")
     sent = await c.send_message(m.chat.id, text, parse_mode=ParseMode.HTML, reply_markup=menu_markup())
-    last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+    last_bot_msgs[m.chat.id] = sent.id
+    logger.info(f'User {user_id} viewed stats')
 
 @bot.on_message(filters.private & filters.command('admin'))
 async def handle_admin(c: Client, m: Message):
     if not ADMIN_IDS or m.from_user.id not in ADMIN_IDS:
         await m.reply('❌ You are not an admin')
+        logger.warning(f'Unauthorized admin access attempt by {m.from_user.id}')
         return
     try:
         await m.delete()
@@ -337,7 +355,8 @@ async def handle_admin(c: Client, m: Message):
         pass
     await _delete_last(c, m.chat.id)
     sent = await c.send_message(m.chat.id, '👑 Admin Panel', parse_mode=ParseMode.HTML, reply_markup=admin_markup())
-    last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+    last_bot_msgs[m.chat.id] = sent.id
+    logger.info(f'✅ Admin panel accessed by user_id: {m.from_user.id}')
 
 # ==================== END OF PART 4 ====================
 
@@ -900,4 +919,5 @@ if __name__ == '__main__':
         logger.info('👋 Bot stopped by user')
 
 # ==================== END OF PART 8 ====================
+
 
