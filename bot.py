@@ -773,9 +773,9 @@ async def webhook_handler(request):
         # Parse the JSON body
         data = json.loads(body)
 
-        # Pyrogram 2.x fix: use the Client.process_update(data) method,
-        # which is the current standard for single parsed updates.
-        await bot.process_update(data)
+        # Pyrogram 2.x Fix: The 'Client' object lacks 'process_update', so we fall back
+        # to the plural method 'process_updates', which accepts a list.
+        await bot.process_updates([data])
 
         # Always return 200 (OK) to Telegram on success or *after logging* an error
         return web.Response(status=200, text='OK')
@@ -808,16 +808,15 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # ======= FIX: delete any existing webhook so polling receives updates =======
+        # Attempt to delete webhook (Pyrogram 2.x method)
         try:
-            # Pyrogram 2.x method is delete_webhook on the Client object
             await bot.delete_webhook(drop_pending_updates=True)
         except AttributeError:
-            # Handle cases where this specific Pyrogram 2.x method might also be missing
-            logger.exception('Client object has no delete_webhook. Ignoring and continuing.')
+            # Expected in some environments/versions. Ignore silently and continue.
+            pass 
         except Exception:
             logger.exception('Failed to delete existing webhook (continuing)')
-        # ========================================================================
+        
         await bot.start()
     except Exception:
         logger.exception('Failed to start bot')
