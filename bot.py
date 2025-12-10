@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bot.py — Pyrogram webhook bot (single-file, Render-ready)
+bot.py — Pyrogram bot with long polling (Render-ready)
 """
 
 # ==================== PART 1: IMPORTS AND CONFIGURATION ====================
@@ -26,7 +26,7 @@ except Exception:
     AsyncConnectionPool = None
 
 from aiohttp import web, ClientSession
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle  # ⚠️ IMPORTANT: idle imported here
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
 
@@ -40,7 +40,6 @@ API_HASH = os.getenv('API_HASH', '')
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
 WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
 DATA_FILE = Path(os.getenv('DATA_FILE', 'data.json'))
 DATABASE_URL = os.getenv('DATABASE_URL')
 SELF_PING_URL = os.getenv('SELF_PING_URL')
@@ -807,7 +806,10 @@ async def self_ping_loop():
 # Main function to run bot and web server together
 async def main():
     """Run both web app and bot together with long polling"""
-    from pyrogram import idle  # Import idle here
+    # idle is already imported at the top in PART 1
+    
+    ping_task = None
+    runner = None
     
     try:
         # Initialize database
@@ -816,6 +818,8 @@ async def main():
         # Start the bot with long polling
         await bot.start()
         logger.info('✅ Bot started successfully with long polling mode')
+        logger.info(f'✅ Bot username: @{bot.me.username}')
+        logger.info(f'✅ Bot ID: {bot.me.id}')
         
         # Start web server for health checks
         runner = web.AppRunner(web_app)
@@ -829,7 +833,8 @@ async def main():
         logger.info('✅ Self-ping task started')
         
         # Keep bot running (this will block until stopped)
-        logger.info('🚀 Bot is now running. Press Ctrl+C to stop.')
+        logger.info('🚀 Bot is now running and listening for updates...')
+        logger.info('📱 Send /start to your bot to test!')
         await idle()
         
     except KeyboardInterrupt:
@@ -840,8 +845,12 @@ async def main():
         # Cleanup
         logger.info('🔄 Cleaning up...')
         
-        if 'ping_task' in locals():
+        if ping_task:
             ping_task.cancel()
+            try:
+                await ping_task
+            except asyncio.CancelledError:
+                pass
         
         try:
             await bot.stop()
@@ -849,7 +858,7 @@ async def main():
         except Exception as e:
             logger.error(f'Error stopping bot: {e}')
         
-        if 'runner' in locals():
+        if runner:
             try:
                 await runner.cleanup()
                 logger.info('✅ Web server stopped')
