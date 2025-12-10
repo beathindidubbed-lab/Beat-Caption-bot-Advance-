@@ -11,6 +11,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
+from pyrogram import Client, filters, idle, StopPropagation
 
 # Optional DB drivers
 try:
@@ -256,6 +257,16 @@ def channel_markup():
 # ==================== END OF PART 3 ====================
 
 # ==================== PART 4: MESSAGE HANDLERS (COMMANDS) ====================
+
+# Test handler - responds to ANY message
+@bot.on_message(filters.private)
+async def test_handler(c: Client, m: Message):
+    logger.info(f'📨 Received message from {m.from_user.id}: {m.text or "non-text"}')
+    # Don't process further, just log
+    raise StopPropagation
+
+@bot.on_message(filters.private & filters.command('start'))
+async def handle_start(c: Client, m: Message):
 
 @bot.on_message(filters.private & filters.command('start'))
 async def handle_start(c: Client, m: Message):
@@ -919,5 +930,6 @@ if __name__ == '__main__':
         logger.info('👋 Bot stopped by user')
 
 # ==================== END OF PART 8 ====================
+
 
 
