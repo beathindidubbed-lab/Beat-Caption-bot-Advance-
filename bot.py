@@ -817,11 +817,10 @@ async def main():
         await init_db()
         
         # Setup web routes for UptimeRobot/health checks
+        # Note: GET routes automatically handle HEAD requests
         web_app.add_routes([
             web.get('/health', health),
-            web.get('/', root),
-            web.head('/', root),
-            web.head('/health', health)
+            web.get('/', root)
         ])
         
         # Start web server for health checks
@@ -901,5 +900,4 @@ if __name__ == '__main__':
         logger.info('👋 Bot stopped by user')
 
 # ==================== END OF PART 8 ====================
-
 
