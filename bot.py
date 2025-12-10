@@ -553,11 +553,17 @@ async def handle_callback(c: Client, cq: CallbackQuery):
                 await c.send_video(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
             elif w.get('message_type') == 'animation':
                 await c.send_animation(chat_id, w['file_id'], caption=f'👁️ Preview\\n{cap}', parse_mode=ParseMode.HTML)
+            except Exception as e:
+                await c.send_message(chat_id, f'Preview failed: {e}')
+            sent = await c.send_message(chat_id, 'Admin menu', reply_markup=admin_markup())
+            last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+            return
         except Exception as e:
             await c.send_message(chat_id, f'Preview failed: {e}')
         sent = await c.send_message(chat_id, 'Admin menu', reply_markup=admin_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+
     if data == 'admin_global_stats' and user_id in ADMIN_IDS:
         total = await _get_all_users_count()
         sent = await cq.message.reply(f'Global users: {total} | Storage: {"Postgres" if (USE_ASYNCPG or USE_PSYCOG) else "JSON"}')
@@ -769,9 +775,10 @@ async def webhook_handler(request):
         if not data:
             return web.Response(status=400, text='No data')
         
-        # FIX: The correct Pyrogram 2.x method on the dispatcher object to process an incoming update dictionary.
-        # This replaces the non-existent 'feed_update'.
-        await bot.dispatcher.process_update(data) 
+        # FINAL FIX: Use the Client's top-level method to process raw updates.
+        # This is the correct, official way to feed updates to a Pyrogram Client 
+        # in a manual webhook scenario. It expects a list of updates.
+        await bot.process_updates([data]) 
         
         return web.Response(status=200, text='OK')
     except Exception:
@@ -802,15 +809,11 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # ======= FIX: Use start to initialize session/handlers, but prevent accidental polling loop =======
         # The bot must call start() to initialize its session and register handlers with Pyrogram.
-        # We rely on the web server (Render) to only call webhook_handler, preventing polling.
-        # The crashing bot.stop() call is now removed.
         await bot.start() 
-        # ==============================================================================================
     except Exception:
         logger.exception('Failed to start bot')
-    # NOTE: set_webhook removed to avoid polling vs webhook conflict
+    
     app['self_ping'] = asyncio.create_task(self_ping_loop())
 
 async def on_shutdown(app):
