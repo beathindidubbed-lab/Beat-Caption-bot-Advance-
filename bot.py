@@ -804,10 +804,12 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # ======= FIX: Use start/stop to initialize session without starting polling =======
-        await bot.start()  # Initialize the session
-        await bot.stop()   # Immediately stop the polling loop (CRITICAL FOR WEBHOOK)
-        # ========================================================================
+        # ======= FIX: Use start to initialize session/handlers, but prevent accidental polling loop =======
+        # The bot must call start() to initialize its session and register handlers with Pyrogram.
+        # We rely on the web server (Render) to only call webhook_handler, preventing polling.
+        # The crashing bot.stop() call is now removed.
+        await bot.start() 
+        # ==============================================================================================
     except Exception:
         logger.exception('Failed to start bot')
     # NOTE: set_webhook removed to avoid polling vs webhook conflict
