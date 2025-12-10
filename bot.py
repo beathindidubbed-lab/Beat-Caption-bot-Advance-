@@ -3,6 +3,8 @@
 bot.py — Pyrogram webhook bot (single-file, Render-ready)
 """
 
+# ==================== PART 1: IMPORTS AND CONFIGURATION ====================
+
 import os
 import asyncio
 import json
@@ -66,6 +68,10 @@ waiting_for_input = {}
 # ---- Defaults ----
 ALL_QUALITIES = ['480p', '720p', '1080p', '4K', '2160p']
 DEFAULT_CAPTION = """• 𝗦𝗘𝗔𝗦𝗢𝗡 {season} || Episode {episode} ({quality})\n{total_episode_text}"""
+
+# ==================== END OF PART 1 ====================
+
+# ==================== PART 2: DATABASE AND STORAGE FUNCTIONS ====================
 
 # ---- Fallback file helpers ----
 def load_fallback():
@@ -204,7 +210,10 @@ async def log_upload_event(user_id: int, data: dict):
     fallback['global']['total_uploads'] = fallback['global'].get('total_uploads', 0) + 1
     await save_fallback()
 
-# ---- Utilities ----
+# ==================== END OF PART 2 ====================
+
+# ==================== PART 3: UI UTILITIES AND MARKUP FUNCTIONS ====================
+
 def get_lock(user_id: int) -> asyncio.Lock:
     if user_id not in user_locks:
         user_locks[user_id] = asyncio.Lock()
@@ -245,7 +254,10 @@ def quality_markup(selected):
 def channel_markup():
     return InlineKeyboardMarkup([[InlineKeyboardButton('📤 Forward Message', callback_data='forward_channel'), InlineKeyboardButton('🔗 Send Username/ID', callback_data='send_channel_id')], [InlineKeyboardButton('⬅️ Back', callback_data='back_to_main')]])
 
-# ---- Handlers ----
+# ==================== END OF PART 3 ====================
+
+# ==================== PART 4: MESSAGE HANDLERS (COMMANDS) ====================
+
 @bot.on_message(filters.private & filters.command('start'))
 async def handle_start(c: Client, m: Message):
     user_id = m.from_user.id
@@ -327,6 +339,10 @@ async def handle_admin(c: Client, m: Message):
     await _delete_last(c, m.chat.id)
     sent = await c.send_message(m.chat.id, '👑 Admin Panel', parse_mode=ParseMode.HTML, reply_markup=admin_markup())
     last_bot_msgs[m.chat.id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
+
+# ==================== END OF PART 4 ====================
+
+# ==================== PART 5: MESSAGE HANDLERS (TEXT, FORWARD, MEDIA) ====================
 
 @bot.on_message(filters.private & (filters.text | filters.sticker) & ~filters.command(['start', 'help', 'stats', 'admin']))
 async def handle_text_input(c: Client, m: Message):
@@ -506,6 +522,10 @@ async def handle_video_upload(c: Client, m: Message):
             logger.exception('Upload error')
             await m.reply(f'❌ Upload failed: {e}')
 
+# ==================== END OF PART 5 ====================
+
+# ==================== PART 6: CALLBACK QUERY HANDLER ====================
+
 @bot.on_callback_query()
 async def handle_callback(c: Client, cq: CallbackQuery):
     data = cq.data
@@ -515,11 +535,13 @@ async def handle_callback(c: Client, cq: CallbackQuery):
     await cq.answer()
     await _delete_last(c, chat_id)
 
+    # Admin callbacks
     if data == 'admin_set_welcome' and user_id in ADMIN_IDS:
         waiting_for_input[user_id] = 'admin_welcome'
         sent = await cq.message.reply('Send a photo/video/animation for welcome (admins only).')
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'admin_preview_welcome' and user_id in ADMIN_IDS:
         w = await _get_welcome()
         if not w:
@@ -539,12 +561,14 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         sent = await c.send_message(chat_id, 'Admin menu', reply_markup=admin_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'admin_global_stats' and user_id in ADMIN_IDS:
         total = await _get_all_users_count()
         sent = await cq.message.reply(f'Global users: {total} | Storage: {"Postgres" if (USE_ASYNCPG or USE_PSYCOG) else "JSON"}')
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
 
+    # User callbacks
     if data == 'preview':
         target = settings.get('target_chat_id')
         target_disp = f'<code>{target}</code>' if target else '❌ Not set'
@@ -553,30 +577,36 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         sent = await cq.message.reply(f'🔍 Caption Preview:\n{preview}\n\nChannel: {target_disp}', parse_mode=ParseMode.HTML, reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'set_caption':
         waiting_for_input[user_id] = 'caption'
         sent = await cq.message.reply('Send new caption template (placeholders: {season},{episode},{total_episode},{quality})', reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'set_season':
         waiting_for_input[user_id] = 'season'
         sent = await cq.message.reply('Send season number', reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'set_episode':
         waiting_for_input[user_id] = 'episode'
         sent = await cq.message.reply('Send episode number (will reset progress)', reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'set_total_episode':
         waiting_for_input[user_id] = 'total_episode'
         sent = await cq.message.reply('Send total episodes count', reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'quality_menu':
         sent = await cq.message.reply('Toggle qualities', reply_markup=quality_markup(settings.get('selected_qualities', [])))
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data and data.startswith('toggle_quality_'):
         q = data.split('toggle_quality_')[-1]
         async with get_lock(user_id):
@@ -589,29 +619,34 @@ async def handle_callback(c: Client, cq: CallbackQuery):
             settings['selected_qualities'] = sel
             await set_user_settings(user_id, settings)
         try:
-            await cq.message.edit('Toggle qualities', reply_markup=quality_markup(settings.get('selected_qualities', [])))
+            await cq.message.edit_text('Toggle qualities', reply_markup=quality_markup(settings.get('selected_qualities', [])))
         except Exception:
             pass
         return
+    
     if data == 'set_channel':
         sent = await cq.message.reply('Choose method', reply_markup=channel_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'forward_channel':
         waiting_for_input[user_id] = 'forward_channel'
         sent = await cq.message.reply('Forward a message from your target channel')
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'send_channel_id':
         waiting_for_input[user_id] = 'channel_id'
         sent = await cq.message.reply('Send the channel username (@name) or ID (-100...)')
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'stats':
         total, today = await _get_user_upload_stats(user_id)
         sent = await cq.message.reply(f'Your uploads: total {total} | today {today}', reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'reset':
         async with get_lock(user_id):
             settings['episode'] = 1
@@ -620,6 +655,7 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         sent = await cq.message.reply('Progress reset', reply_markup=menu_markup())
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
+    
     if data == 'back_to_main' or data == 'cancel':
         if user_id in waiting_for_input:
             del waiting_for_input[user_id]
@@ -633,7 +669,10 @@ async def handle_callback(c: Client, cq: CallbackQuery):
         last_bot_msgs[chat_id] = getattr(sent, 'message_id', getattr(sent, 'id', None))
         return
 
-# Helper functions
+# ==================== END OF PART 6 ====================
+
+# ==================== PART 7: HELPER FUNCTIONS ====================
+
 async def _save_channel_info(user_id, chat):
     if USE_ASYNCPG and _pg_pool:
         async with _pg_pool.acquire() as conn:
@@ -742,12 +781,23 @@ async def _delete_last(client, chat_id):
     except Exception:
         pass
 
+# ==================== END OF PART 7 ====================
+
+# ==================== PART 8: WEBHOOK & STARTUP/SHUTDOWN ====================
+
 # Webhook & health endpoints
 async def webhook_handler(request):
     try:
         body = await request.read()
         if not body:
             return web.Response(status=400, text='No data')
+        
+        # Parse update and handle it
+        update_data = json.loads(body.decode('utf-8'))
+        
+        # Create an update object and pass it to handlers
+        # Note: Pyrogram doesn't natively support processing updates from dict
+        # This is a placeholder - actual implementation would need update handling
         
         return web.Response(status=200, text='OK')
         
@@ -777,18 +827,15 @@ async def on_startup(app):
     await init_db()
     try:
         await bot.start()
+        logger.info('Bot started successfully')
+        
+        # Note: Pyrogram Client doesn't have webhook methods like delete_webhook/set_webhook
+        # You would need to use bot API directly or use python-telegram-bot for webhook support
+        # For now, bot is running in long polling mode via bot.start()
         
         if WEBHOOK_URL:
-            webhook_url = f"{WEBHOOK_URL}/webhook"
-            try:
-                await bot.delete_webhook(drop_pending_updates=True)
-                await bot.set_webhook(webhook_url)
-                logger.info(f'Webhook set to: {webhook_url}')
-            except Exception:
-                logger.exception('Failed to set webhook')
-        else:
-            logger.warning('WEBHOOK_URL not set - bot will not receive updates!')
-            
+            logger.warning('Webhook URL provided but Pyrogram uses long polling. Consider using python-telegram-bot for webhook support.')
+        
     except Exception:
         logger.exception('Failed to start bot')
     
@@ -823,3 +870,5 @@ web_app.on_shutdown.append(on_shutdown)
 if __name__ == '__main__':
     logger.info('Starting web app on %s:%s', WEBHOOK_HOST, WEBHOOK_PORT)
     web.run_app(web_app, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
+
+# ==================== END OF PART 8 ====================
