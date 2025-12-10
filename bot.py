@@ -793,20 +793,21 @@ async def root(request):
 
 async def self_ping_loop():
     if not SELF_PING_URL:
+        logger.info('⚠️ SELF_PING_URL not set, skipping self-ping')
         return
+    await asyncio.sleep(60)  # Wait 1 min before first ping
     async with ClientSession() as sess:
         while True:
             try:
-                await sess.get(SELF_PING_URL)
-                logger.info('Self-ping successful')
-            except Exception:
-                logger.exception('Self-ping failed')
-            await asyncio.sleep(300)
+                async with sess.get(SELF_PING_URL, timeout=10) as resp:
+                    logger.info(f'✅ Self-ping successful: {resp.status}')
+            except Exception as e:
+                logger.error(f'❌ Self-ping failed: {e}')
+            await asyncio.sleep(300)  # Ping every 5 minutes
 
 # Main function to run bot and web server together
 async def main():
     """Run both web app and bot together with long polling"""
-    # idle is already imported at the top in PART 1
     
     ping_task = None
     runner = None
@@ -815,11 +816,13 @@ async def main():
         # Initialize database
         await init_db()
         
-        # Start the bot with long polling
-        await bot.start()
-        logger.info('✅ Bot started successfully with long polling mode')
-        logger.info(f'✅ Bot username: @{bot.me.username}')
-        logger.info(f'✅ Bot ID: {bot.me.id}')
+        # Setup web routes for UptimeRobot/health checks
+        web_app.add_routes([
+            web.get('/health', health),
+            web.get('/', root),
+            web.head('/', root),
+            web.head('/health', health)
+        ])
         
         # Start web server for health checks
         runner = web.AppRunner(web_app)
@@ -828,14 +831,23 @@ async def main():
         await site.start()
         logger.info(f'✅ Web server started on {WEBHOOK_HOST}:{WEBHOOK_PORT}')
         
+        # Start the bot with long polling
+        await bot.start()
+        me = await bot.get_me()
+        logger.info(f'✅ Bot started successfully with long polling mode')
+        logger.info(f'✅ Bot username: @{me.username}')
+        logger.info(f'✅ Bot ID: {me.id}')
+        
         # Start self-ping task
-        ping_task = asyncio.create_task(self_ping_loop())
-        logger.info('✅ Self-ping task started')
+        if SELF_PING_URL:
+            ping_task = asyncio.create_task(self_ping_loop())
+            logger.info('✅ Self-ping task started')
         
         # Keep bot running (this will block until stopped)
         logger.info('🚀 Bot is now running and listening for updates...')
         logger.info('📱 Send /start to your bot to test!')
-        await idle()
+        
+        await idle()  # This keeps the bot running
         
     except KeyboardInterrupt:
         logger.info('⚠️ Received stop signal')
@@ -845,7 +857,7 @@ async def main():
         # Cleanup
         logger.info('🔄 Cleaning up...')
         
-        if ping_task:
+        if ping_task and not ping_task.done():
             ping_task.cancel()
             try:
                 await ping_task
@@ -879,16 +891,15 @@ async def main():
             except Exception as e:
                 logger.error(f'Error closing asyncpg pool: {e}')
 
-# Setup web routes (only health checks, no webhook processing)
-web_app.add_routes([
-    web.get('/health', health),
-    web.get('/', root)
-])
-
 if __name__ == '__main__':
     logger.info('='*60)
     logger.info('🤖 Starting Telegram Bot with Long Polling Mode')
     logger.info('='*60)
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info('👋 Bot stopped by user')
 
 # ==================== END OF PART 8 ====================
+
+
