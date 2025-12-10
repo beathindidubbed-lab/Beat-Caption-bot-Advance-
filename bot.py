@@ -835,115 +835,79 @@ async def health(request):
 async def root(request):
     return web.Response(text='Bot Running', status=200)
 
-async def self_ping_loop():
-    if not SELF_PING_URL:
-        logger.info('⚠️ SELF_PING_URL not set, skipping self-ping')
-        return
-    await asyncio.sleep(60)  # Wait 1 min before first ping
-    async with ClientSession() as sess:
-        while True:
-            try:
-                async with sess.get(SELF_PING_URL, timeout=10) as resp:
-                    logger.info(f'✅ Self-ping successful: {resp.status}')
-            except Exception as e:
-                logger.error(f'❌ Self-ping failed: {e}')
-            await asyncio.sleep(300)  # Ping every 5 minutes
-
-# Main function to run bot and web server together
-async def main():
-    """Run both web app and bot together with long polling"""
+async def start_web_server():
+    """Start web server for Render health checks"""
+    web_app.add_routes([
+        web.get('/health', health),
+        web.get('/', root)
+    ])
     
-    ping_task = None
-    runner = None
-    
-    try:
-        # Initialize database
-        await init_db()
-        
-        # Setup web routes for UptimeRobot/health checks
-        # Note: GET routes automatically handle HEAD requests
-        web_app.add_routes([
-            web.get('/health', health),
-            web.get('/', root)
-        ])
-        
-        # Start web server for health checks
-        runner = web.AppRunner(web_app)
-        await runner.setup()
-        site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
-        await site.start()
-        logger.info(f'✅ Web server started on {WEBHOOK_HOST}:{WEBHOOK_PORT}')
-        
-        # Start the bot with long polling
-        await bot.start()
-        me = await bot.get_me()
-        logger.info(f'✅ Bot started successfully with long polling mode')
-        logger.info(f'✅ Bot username: @{me.username}')
-        logger.info(f'✅ Bot ID: {me.id}')
-        
-        # Start self-ping task
-        if SELF_PING_URL:
-            ping_task = asyncio.create_task(self_ping_loop())
-            logger.info('✅ Self-ping task started')
-        
-        # Keep bot running (this will block until stopped)
-        logger.info('🚀 Bot is now running and listening for updates...')
-        logger.info('📱 Send /start to your bot to test!')
-        
-        await idle()  # This keeps the bot running
-        
-    except KeyboardInterrupt:
-        logger.info('⚠️ Received stop signal')
-    except Exception as e:
-        logger.exception(f'❌ Error in main: {e}')
-    finally:
-        # Cleanup
-        logger.info('🔄 Cleaning up...')
-        
-        if ping_task and not ping_task.done():
-            ping_task.cancel()
-            try:
-                await ping_task
-            except asyncio.CancelledError:
-                pass
-        
-        try:
-            await bot.stop()
-            logger.info('✅ Bot stopped')
-        except Exception as e:
-            logger.error(f'Error stopping bot: {e}')
-        
-        if runner:
-            try:
-                await runner.cleanup()
-                logger.info('✅ Web server stopped')
-            except Exception as e:
-                logger.error(f'Error stopping web server: {e}')
-        
-        if USE_PSYCOG and _psycopg_pool:
-            try:
-                await _psycopg_pool.close()
-                logger.info('✅ PostgreSQL pool closed (psycopg)')
-            except Exception as e:
-                logger.error(f'Error closing psycopg pool: {e}')
-        
-        if USE_ASYNCPG and _pg_pool:
-            try:
-                await _pg_pool.close()
-                logger.info('✅ PostgreSQL pool closed (asyncpg)')
-            except Exception as e:
-                logger.error(f'Error closing asyncpg pool: {e}')
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
+    await site.start()
+    logger.info(f'✅ Web server started on {WEBHOOK_HOST}:{WEBHOOK_PORT}')
+    return runner
 
 if __name__ == '__main__':
+    import sys
+    import signal
+    import threading
+    import time
+    
+    def signal_handler(sig, frame):
+        logger.info("🛑 Received shutdown signal")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     logger.info('='*60)
     logger.info('🤖 Starting Telegram Bot with Long Polling Mode')
     logger.info('='*60)
+    
     try:
-        asyncio.run(main())
+        # Initialize database and web server in a separate thread
+        def init_services():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            logger.info("Initializing database...")
+            loop.run_until_complete(init_db())
+            logger.info("✅ Database initialized successfully!")
+            
+            logger.info("Starting web server...")
+            loop.run_until_complete(start_web_server())
+            
+            # Keep the loop running for the web server
+            loop.run_forever()
+        
+        # Start services in background thread
+        services_thread = threading.Thread(target=init_services, daemon=True)
+        services_thread.start()
+        
+        # Wait for services to initialize
+        time.sleep(3)
+        
+        logger.info('='*60)
+        logger.info('STARTING PYROGRAM BOT...')
+        logger.info('='*60)
+        
+        sys.stdout.flush()
+        
+        # Start the bot in the main thread - THIS IS THE KEY!
+        bot.run()
+        
     except KeyboardInterrupt:
-        logger.info('👋 Bot stopped by user')
+        logger.info("👋 Bot stopped by user")
+    except Exception as e:
+        logger.exception(f"❌ FATAL ERROR: {e}")
+        sys.exit(1)
 
 # ==================== END OF PART 8 ====================
+
+# ==================== END OF PART 8 ====================
+
 
 
 
