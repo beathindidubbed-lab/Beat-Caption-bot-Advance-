@@ -267,9 +267,6 @@ async def test_handler(c: Client, m: Message):
 
 @bot.on_message(filters.private & filters.command('start'))
 async def handle_start(c: Client, m: Message):
-
-@bot.on_message(filters.private & filters.command('start'))
-async def handle_start(c: Client, m: Message):
     user_id = m.from_user.id
     first_name = m.from_user.first_name or 'User'
     
@@ -930,6 +927,7 @@ if __name__ == '__main__':
         logger.info('👋 Bot stopped by user')
 
 # ==================== END OF PART 8 ====================
+
 
 
 
