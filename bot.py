@@ -24,6 +24,7 @@ from aiohttp import web, ClientSession
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
+from pyrogram.errors import StopPropagation  # ADDED THIS LINE
 
 # ---- Logging ----
 logging.basicConfig(
@@ -67,7 +68,7 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=4  # Add this
+    workers=4
 )
 
 # ---- DB globals ----
@@ -275,17 +276,12 @@ def channel_markup():
 
 # ==================== PART 4: MESSAGE HANDLERS (COMMANDS) ====================
 
-# Test handler - responds to ANY message
-@bot.on_message(filters.private)
-async def test_handler(c: Client, m: Message):
-    logger.info(f'📨 Received message from {m.from_user.id}: {m.text or "non-text"}')
-    # Don't process further, just log
-    raise StopPropagation
-
 @bot.on_message(filters.private & filters.command('start'))
 async def handle_start(c: Client, m: Message):
     user_id = m.from_user.id
     first_name = m.from_user.first_name or 'User'
+    
+    logger.info(f'📨 User {user_id} ({first_name}) sent /start command')
     
     # Get user settings to initialize user in database
     settings = await get_user_settings(user_id)
@@ -907,6 +903,7 @@ if __name__ == '__main__':
 # ==================== END OF PART 8 ====================
 
 # ==================== END OF PART 8 ====================
+
 
 
 
