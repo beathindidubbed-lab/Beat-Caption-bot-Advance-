@@ -807,6 +807,8 @@ async def self_ping_loop():
 # Main function to run bot and web server together
 async def main():
     """Run both web app and bot together with long polling"""
+    from pyrogram import idle  # Import idle here
+    
     try:
         # Initialize database
         await init_db()
