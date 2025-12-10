@@ -765,19 +765,24 @@ async def _delete_last(client, chat_id):
 # Webhook & health endpoints
 async def webhook_handler(request):
     try:
-        data = await request.json() # Parse JSON data from the request body
-        if not data:
+        # Read the raw body first to get data from Telegram
+        body = await request.read()
+        if not body:
             return web.Response(status=400, text='No data')
-        
-        # FINAL FIX: Use bot.dispatcher.feed_update(data)
-        # This is the correct, official way to feed a single raw update 
-        # to a Pyrogram Client when 'process_updates' is unavailable.
-        await bot.dispatcher.feed_update(data) 
-        
+            
+        # Parse the JSON body
+        data = json.loads(body)
+
+        # Pyrogram 2.x fix: use the Client.process_update(data) method,
+        # which is the current standard for single parsed updates.
+        await bot.process_update(data)
+
+        # Always return 200 (OK) to Telegram on success or *after logging* an error
         return web.Response(status=200, text='OK')
+        
     except Exception:
         # Log the error, but still return 200 (OK) to Telegram to prevent retries.
-        logger.exception('Webhook handler error') 
+        logger.exception('Webhook handler error')
         return web.Response(status=200, text='Error occurred, but acknowledged')
 
 async def health(request):
@@ -803,15 +808,20 @@ async def self_ping_loop():
 async def on_startup(app):
     await init_db()
     try:
-        # FIX: delete any existing webhook so polling receives updates
+        # ======= FIX: delete any existing webhook so polling receives updates =======
         try:
+            # Pyrogram 2.x method is delete_webhook on the Client object
             await bot.delete_webhook(drop_pending_updates=True)
+        except AttributeError:
+            # Handle cases where this specific Pyrogram 2.x method might also be missing
+            logger.exception('Client object has no delete_webhook. Ignoring and continuing.')
         except Exception:
             logger.exception('Failed to delete existing webhook (continuing)')
+        # ========================================================================
         await bot.start()
     except Exception:
         logger.exception('Failed to start bot')
-    
+    # NOTE: set_webhook removed to avoid polling vs webhook conflict
     app['self_ping'] = asyncio.create_task(self_ping_loop())
 
 async def on_shutdown(app):
@@ -820,8 +830,7 @@ async def on_shutdown(app):
     try:
         await bot.stop()
     except Exception:
-        # Note: The RuntimeError during stop is a known async issue. Logging and continuing is correct.
-        logger.exception('Error stopping bot') 
+        logger.exception('Error stopping bot')
     if USE_PSYCOG and _psycopg_pool:
         try:
             await _psycopg_pool.close()
